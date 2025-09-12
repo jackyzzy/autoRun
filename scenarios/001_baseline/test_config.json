@@ -1,0 +1,22 @@
+{
+  "base_url": "http://10.112.0.201:18008",
+  "model": "/data/Qwen3-235B-A22B",
+  "tokenizer_path": "./tokenizer",
+  "dataset_path": "ShareGPT_V3_10000.json",
+  "dataset_name": "sharegpt",
+  "num_prompts": 1000,
+  "max_concurrency": 20,
+  "sharegpt_input_len": 4096,
+  "sharegpt_output_len": 1024,
+  "sharegpt_prompt_len_scale": 0.1,
+  "enable_same_prompt": true,
+  "metadata": {
+    "scenario": "baseline_test",
+    "arch": "x86",
+    "gpu": "NVIDIA H200", 
+    "gpu_num": 4,
+    "replicas": 2,
+    "backend": "sglang410",
+    "config_type": "baseline"
+  }
+}

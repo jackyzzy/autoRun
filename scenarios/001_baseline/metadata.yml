@@ -1,0 +1,12 @@
+name: "baseline_test"
+description: "基线性能测试 - 使用默认配置测试推理引擎的基准性能"
+version: "1.0"
+tags: ["performance", "baseline", "stable"]
+estimated_duration: 1800  # 30分钟
+dependencies: []
+resource_requirements:
+  min_gpu_memory: "24GB"
+  min_nodes: 2
+  min_memory_gb: 32
+author: "AI Performance Team"
+created: "2024-09-06"

@@ -1,0 +1,12 @@
+name: "template_scenario"
+description: "场景描述 - 说明这个场景的用途和目标"
+version: "1.0"
+tags: ["template", "example"]  # 场景标签，用于分类和过滤
+estimated_duration: 1800  # 预估执行时间（秒）
+dependencies: []  # 依赖的其他场景
+resource_requirements:
+  min_gpu_memory: "24GB"  # 最小GPU内存要求
+  min_nodes: 2            # 最少节点数
+  min_memory_gb: 32       # 最小系统内存（GB）
+author: "测试团队"
+created: "2024-09-06"

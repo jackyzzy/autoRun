@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # P服务 - 主推理服务
+  p-1:
+    image: "inference-engine:latest"
+    container_name: "inference-p-1"
+    restart: unless-stopped
+    environment:
+      - SERVICE_TYPE=primary
+      - GPU_MEMORY=24G
+      - MODEL_PATH=/data/your-model-path
+      - REPLICAS=2
+      # 根据场景需要添加其他环境变量
+    ports:
+      - "18008:8000"
+    volumes:
+      - "/data:/data:ro"
+      - "/opt/inference/logs:/app/logs"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0', '1']  # 根据需要调整GPU分配
+              capabilities: [gpu]
+    networks:
+      - inference-network
+
+  # D服务 - 数据处理服务  
+  d-1:
+    image: "data-processor:latest"
+    container_name: "inference-d-1"
+    restart: unless-stopped
+    environment:
+      - SERVICE_TYPE=data
+      - BATCH_SIZE=32
+      # 根据场景需要调整配置
+    ports:
+      - "18009:8001"
+    volumes:
+      - "/data:/data:ro"
+      - "/opt/inference/cache:/app/cache"
+    depends_on:
+      - p-1
+    networks:
+      - inference-network
+
+  # 根据需要添加更多服务...
+
+networks:
+  inference-network:
+    driver: bridge
