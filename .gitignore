@@ -165,6 +165,9 @@ task.md
 # Config directory - ignore all content but keep directory structure
 config/*
 !config/.gitkeep
+!config/scenarios/
+config/scenarios/*
+!config/scenarios/.gitkeep
 
 # OS generated files
 .DS_Store
