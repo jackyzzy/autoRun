@@ -247,7 +247,7 @@ class ScenarioManager:
         
         # 配置
         self.config_file = config_file
-        self.scenarios_root = scenarios_root or "scenarios"
+        self.scenarios_root = scenarios_root or "config/scenarios"
         
         # 场景数据
         self.scenarios: Dict[str, Scenario] = {}

@@ -23,7 +23,7 @@ class PlaybookCore:
     
     def __init__(self, 
                  config_dir: str = "config",
-                 scenarios_dir: str = "scenarios",
+                 scenarios_dir: str = "config/scenarios",
                  results_dir: str = "results",
                  log_level: str = "INFO"):
         """

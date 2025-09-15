@@ -18,18 +18,22 @@
 test_playbook/
 ├── playbook.py              # 主程序入口
 ├── requirements.txt         # Python依赖
-├── config/                  # 配置文件
-│   ├── nodes.yaml          # 节点配置
-│   ├── scenarios.yaml      # 场景配置
-│   └── benchmark.yaml      # 基准测试配置
+├── config/                  # 配置文件（实际使用的配置，不提交到git）
+│   ├── nodes.yaml          # 节点配置（从模板复制并自定义）
+│   ├── scenarios.yaml      # 场景配置（从模板复制并自定义）
+│   └── scenarios/          # 测试场景目录
+│       ├── 001_baseline/   # 基线测试场景
+│       ├── 002_memory_opt/ # 内存优化场景
+│       └── ...             # 更多场景
+├── templates/               # 配置模板和示例
+│   ├── config/             # 配置文件模板
+│   │   ├── nodes.yaml      # 脱敏的节点配置模板
+│   │   ├── scenarios.yaml  # 脱敏的场景配置模板
+│   │   └── scenarios/      # 场景模板目录
+│   └── README.md           # 模板使用说明
 ├── src/                     # 源代码
 │   ├── playbook/           # 核心模块
 │   └── utils/              # 工具模块
-├── scenarios/               # 测试场景目录
-│   ├── 001_baseline/       # 基线测试场景
-│   ├── 002_memory_opt/     # 内存优化场景
-│   └── ...                 # 更多场景
-├── templates/               # 配置模板
 ├── logs/                    # 日志文件
 └── results/                # 测试结果
 ```
@@ -42,27 +46,46 @@ test_playbook/
 pip install -r requirements.txt
 ```
 
-### 2. 配置节点信息
+### 2. 配置文件设置
 
-编辑 `config/nodes.yaml`：
+**重要提示**: `config/` 目录中的文件不会提交到git仓库，这些是您的实际配置文件。
+
+#### 初始化配置文件
+
+从模板复制配置文件：
+
+```bash
+# 复制配置模板
+cp -r templates/config/* config/
+
+# 或者单独复制需要的文件
+cp templates/config/nodes.yaml config/
+cp templates/config/scenarios.yaml config/
+cp -r templates/config/scenarios config/
+```
+
+#### 配置节点信息
+
+编辑 `config/nodes.yaml`，替换为您的实际配置：
 
 ```yaml
 nodes:
   node1:
-    host: "10.112.0.201"
-    username: "root"
-    password: "${NODE1_PASSWORD}"
+    host: "YOUR_ACTUAL_IP"              # 替换为实际IP地址
+    username: "root"                    # 替换为实际用户名
+    password: "${NODE1_PASSWORD}"       # 设置环境变量
     enabled: true
     docker_compose_path: "/opt/inference"
-    results_path: "/home/zjwei/benchmark/results"
+    results_path: "/opt/benchmark/results"
 ```
 
-### 3. 配置场景执行
+#### 配置场景执行
 
 编辑 `config/scenarios.yaml`：
 
 ```yaml
 execution:
+  scenarios_root: "config/scenarios"   # 场景根目录
   execution_mode: "custom"
   custom_order:
     - name: "baseline_test"
@@ -71,12 +94,12 @@ execution:
       description: "基线性能测试"
 ```
 
-### 4. 设置环境变量
+### 3. 设置环境变量
 
 ```bash
-export NODE1_PASSWORD="your_password"
-export NODE2_PASSWORD="your_password"
-export NODE3_PASSWORD="your_password"
+export NODE1_PASSWORD="your_actual_password"
+export NODE2_PASSWORD="your_actual_password"
+export NODE3_PASSWORD="your_actual_password"
 ```
 
 ## 🎯 使用方法

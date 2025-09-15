@@ -44,7 +44,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 @click.group()
 @click.option('--config-dir', '-c', default='config', help='Configuration directory')
-@click.option('--scenarios-dir', '-s', default='scenarios', help='Scenarios directory')
+@click.option('--scenarios-dir', '-s', default='config/scenarios', help='Scenarios directory')
 @click.option('--results-dir', '-r', default='results', help='Results directory')
 @click.option('--log-level', '-l', default='INFO', 
               type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),

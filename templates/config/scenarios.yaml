@@ -1,0 +1,106 @@
+# 测试场景配置文件模板
+# 定义场景执行顺序、过滤规则等
+# 使用时请复制此文件到 config/scenarios.yaml 并修改为实际配置
+
+# 场景执行配置
+execution:
+  # 场景根目录（可通过命令行参数覆盖）
+  scenarios_root: "config/scenarios"
+  
+  # 场景执行模式
+  # auto: 自动发现场景目录，按数字前缀排序
+  # directory: 严格按目录名排序
+  # custom: 使用下面的custom_order自定义顺序
+  execution_mode: "custom"
+  
+  # 自定义执行顺序（仅在execution_mode为custom时生效）
+  custom_order:
+    - name: "baseline_test"
+      directory: "001_baseline"
+      enabled: true
+      description: "基线性能测试 - 默认配置下的性能基准"
+
+    - name: "memory_optimization"
+      directory: "002_memory_opt"
+      enabled: true
+      description: "内存优化配置测试 - 测试内存优化对性能的影响"
+      
+    - name: "gpu_scaling"
+      directory: "003_gpu_scale"
+      enabled: false
+      description: "GPU扩展测试 - 测试多GPU配置下的性能表现"
+      
+    - name: "concurrent_load"
+      directory: "004_concurrent"
+      enabled: false
+      description: "并发负载测试 - 高并发场景下的性能测试"
+      
+    - name: "large_model_test"
+      directory: "005_large_model"
+      enabled: false
+      description: "大模型测试 - 测试超大模型的推理性能"
+      
+    - name: "batch_processing"
+      directory: "006_batch"
+      enabled: false
+      description: "批处理测试 - 批量请求处理性能测试"
+
+# 场景过滤配置
+filters:
+  # 只执行包含这些标签的场景（为空则不过滤）
+  include_tags: []
+  # 排除包含这些标签的场景
+  exclude_tags: ["experimental", "deprecated"]
+  
+  # 只执行指定的场景（为空则执行所有enabled场景）
+  only_scenarios: []
+  # 跳过指定的场景
+  skip_scenarios: []
+
+# 场景间配置
+inter_scenario:
+  # 场景间等待时间（秒）
+  wait_between_scenarios: 120
+  # 场景失败后是否继续执行后续场景
+  continue_on_failure: true
+  # 场景失败时的重试次数
+  retry_count: 1
+  # 重试间隔（秒）
+  retry_interval: 300
+
+# 监控和日志配置
+monitoring:
+  # 是否启用详细日志
+  verbose_logging: true
+  # 是否为每个场景创建单独的日志文件
+  separate_logs: true
+  # 性能监控采样间隔（秒）
+  performance_sampling_interval: 30
+
+# 通知配置
+notifications:
+  # 是否启用通知
+  enabled: false
+  # 通知方式配置
+  email:
+    enabled: false
+    smtp_server: "smtp.example.com"
+    smtp_port: 587
+    username: "${EMAIL_USERNAME}"
+    password: "${EMAIL_PASSWORD}"
+    from_address: "playbook@example.com"
+    to_addresses: ["admin@example.com"]
+  
+  webhook:
+    enabled: false
+    url: "${WEBHOOK_URL}"
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer ${WEBHOOK_TOKEN}"
+
+# 环境变量设置说明
+# 如果启用通知功能，请设置以下环境变量：
+# export EMAIL_USERNAME="your_email_username"
+# export EMAIL_PASSWORD="your_email_password"
+# export WEBHOOK_URL="https://your-webhook-url.com/notify"
+# export WEBHOOK_TOKEN="your_webhook_token"

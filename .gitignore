@@ -162,6 +162,10 @@ logs/
 results/
 task.md
 
+# Config directory - ignore all content but keep directory structure
+config/*
+!config/.gitkeep
+
 # OS generated files
 .DS_Store
 .DS_Store?

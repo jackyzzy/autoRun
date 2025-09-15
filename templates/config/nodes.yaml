@@ -1,0 +1,80 @@
+# 节点服务器配置文件模板
+# 配置分布式推理引擎的各个节点信息
+# 使用时请复制此文件到 config/nodes.yaml 并修改为实际配置
+
+nodes:
+  # 节点1 - 主节点
+  node1:
+    host: "192.168.1.100"           # 替换为实际主机IP
+    username: "root"                # 替换为实际用户名
+    password: "${NODE1_PASSWORD}"   # 设置环境变量或直接填写密码
+    # key_filename: "/path/to/ssh/key"  # SSH密钥文件路径（可选）
+    port: 22                        # SSH端口
+    tags: ["inference", "primary"]
+    role: "master"
+    enabled: true
+    
+    # 节点特定配置
+    docker_compose_path: "/opt/inference"    # Docker Compose工作目录
+    work_dir: "/opt/inference"               # 工作目录
+    results_path: "/opt/benchmark/results"   # 测试结果路径
+    
+  # 节点2 - 工作节点
+  node2:
+    host: "192.168.1.101"           # 替换为实际主机IP
+    username: "root"                # 替换为实际用户名
+    password: "${NODE2_PASSWORD}"   # 设置环境变量或直接填写密码
+    port: 22
+    tags: ["inference", "worker"]
+    role: "worker"
+    enabled: false                  # 默认禁用，按需启用
+    
+    docker_compose_path: "/opt/inference"
+    work_dir: "/opt/inference"
+    results_path: "/opt/benchmark/results"
+    
+  # 节点3 - 工作节点
+  node3:
+    host: "192.168.1.102"           # 替换为实际主机IP
+    username: "root"                # 替换为实际用户名
+    password: "${NODE3_PASSWORD}"   # 设置环境变量或直接填写密码
+    port: 22
+    tags: ["inference", "worker"]
+    role: "worker"
+    enabled: false                  # 默认禁用，按需启用
+    
+    docker_compose_path: "/opt/inference"
+    work_dir: "/opt/inference"
+    results_path: "/opt/benchmark/results"
+    
+  # 节点4 - 备用节点（默认禁用）
+  node4:
+    host: "192.168.1.103"           # 替换为实际主机IP
+    username: "root"                # 替换为实际用户名
+    password: "${NODE4_PASSWORD}"   # 设置环境变量或直接填写密码
+    port: 22
+    tags: ["inference", "backup"]
+    role: "worker"
+    enabled: false                  # 默认不启用
+
+    docker_compose_path: "/opt/inference"
+    work_dir: "/opt/inference"
+    results_path: "/opt/benchmark/results"
+
+# 全局配置
+global_config:
+  # SSH连接池配置
+  ssh_pool_size: 10
+  connection_timeout: 30
+  
+  # 默认路径配置
+  default_docker_compose_path: "/opt/inference"
+  default_work_dir: "/opt/inference"
+  default_results_path: "/opt/benchmark/results"
+
+# 环境变量设置说明
+# 请在系统中设置以下环境变量，或在.env文件中配置：
+# export NODE1_PASSWORD="your_node1_password"
+# export NODE2_PASSWORD="your_node2_password"
+# export NODE3_PASSWORD="your_node3_password"
+# export NODE4_PASSWORD="your_node4_password"
