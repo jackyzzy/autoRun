@@ -112,7 +112,7 @@ class PlaybookCore:
         
         try:
             # 1. 系统健康检查
-            self.logger.info("Step 1: Performing health checks")
+            self.logger.info("\n\nStep 1: Performing health checks")
             health_results = self.health_checker.run_all_checks()
             overall_health = self.health_checker.get_overall_health()
             
@@ -122,7 +122,7 @@ class PlaybookCore:
                 self.logger.warning("System health is degraded, but continuing with tests")
             
             # 2. 验证测试环境
-            self.logger.info("Step 2: Validating test environment")
+            self.logger.info("\n\nStep 2: Validating test environment")
             nodes = self.node_manager.get_nodes(enabled_only=True)
             node_names = [node.name for node in nodes]
             validation_results = self.benchmark_runner.validate_test_environment(node_names)
@@ -136,11 +136,11 @@ class PlaybookCore:
                 self.logger.warning(f"Some nodes failed validation: {failed_nodes}")
             
             # 3. 执行所有场景
-            self.logger.info("Step 3: Executing all scenarios")
+            self.logger.info("\n\nStep 3: Executing all scenarios")
             scenario_results = self.scenario_runner.run_all_scenarios()
             
             # 4. 收集和汇总结果
-            self.logger.info("Step 4: Collecting and summarizing results")
+            self.logger.info("\n\nStep 4: Collecting and summarizing results")
             
             # 为每个场景收集结果（这里简化处理）
             all_summaries = {}
@@ -172,7 +172,7 @@ class PlaybookCore:
                 'validation_results': validation_results
             }
             
-            self.logger.info("Full test suite execution completed successfully")
+            self.logger.info("\n\nFull test suite execution completed successfully")
             return final_results
             
         except Exception as e:
