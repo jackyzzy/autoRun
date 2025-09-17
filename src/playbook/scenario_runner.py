@@ -258,7 +258,7 @@ class ScenarioRunner:
         
         # 检查是否有部署配置
         if scenario.metadata and scenario.metadata.deployment.services:
-            logger.info("\n\nUsing advanced distributed deployment configuration")
+            logger.info("Using advanced distributed deployment configuration")
             
             logger.info("\n\nStep 1: Validating deployment configuration")
             self._validate_deployment_config(scenario, result, logger)
@@ -330,14 +330,15 @@ class ScenarioRunner:
         for node in nodes:
             logger.info(f"Starting services on node {node.name}")
             
-            # 切换到工作目录并启动服务
-            commands = [
-                f"cd {node.docker_compose_path}",
-                f"docker compose -f {Path(compose_file).name} up -d"
-            ]
-            
-            command = " && ".join(commands)
-            results = self.node_manager.execute_command(command, [node.name])
+            # 使用适配器构建并执行启动命令
+            compose_cmd = self.node_manager.build_compose_command(
+                node_name=node.name,
+                command_type="up",
+                file=compose_file
+            )
+
+            full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
+            results = self.node_manager.execute_command(full_cmd, [node.name])
             
             node_result = results.get(node.name)
             if not node_result or node_result[0] != 0:
@@ -451,14 +452,16 @@ class ScenarioRunner:
         for node in nodes:
             logger.info(f"Stopping services on node {node.name}")
             
-            commands = [
-                f"cd {node.docker_compose_path}",
-                f"docker compose -f {Path(compose_file).name} down"
-            ]
-            
-            command = " && ".join(commands)
+            # 使用适配器构建并执行停止命令
+            compose_cmd = self.node_manager.build_compose_command(
+                node_name=node.name,
+                command_type="down",
+                file=compose_file
+            )
+
+            full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
             results = self.node_manager.execute_command(
-                command, [node.name], timeout=120
+                full_cmd, [node.name], timeout=120
             )
             
             node_result = results.get(node.name)

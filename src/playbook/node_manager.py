@@ -10,6 +10,7 @@ import yaml
 from pathlib import Path
 
 from ..utils.ssh_client import SSHClient, ssh_pool, SSHConnectionError, SSHExecutionError
+from ..utils.docker_compose_adapter import DockerComposeAdapterManager, ComposeCommand
 
 
 class Node:
@@ -30,6 +31,9 @@ class Node:
         self.docker_compose_path = config.get('docker_compose_path', '/opt/inference')
         self.work_dir = config.get('work_dir', '/opt/inference')
         self.results_path = config.get('results_path', '/home/zjwei/benchmark/results')
+
+        # Docker Compose版本配置（新增）
+        self.docker_compose_version = config.get('docker_compose_version', 'auto')
         
     def get_ssh_client(self) -> SSHClient:
         """获取SSH客户端"""
@@ -50,7 +54,8 @@ class Node:
             'enabled': self.enabled,
             'docker_compose_path': self.docker_compose_path,
             'work_dir': self.work_dir,
-            'results_path': self.results_path
+            'results_path': self.results_path,
+            'docker_compose_version': self.docker_compose_version
         }
 
 
@@ -61,7 +66,10 @@ class NodeManager:
         self.logger = logging.getLogger("playbook.node_manager")
         self.nodes: Dict[str, Node] = {}
         self.config_file = config_file
-        
+
+        # 初始化Docker Compose适配器管理器
+        self.compose_adapter_manager = DockerComposeAdapterManager(self.execute_command)
+
         if config_file and Path(config_file).exists():
             self.load_config(config_file)
     
@@ -382,3 +390,94 @@ class NodeManager:
             'tags': sorted(list(tags)),
             'connection_pool_size': ssh_pool.get_connection_count()
         }
+
+    def build_compose_command(self, node_name: str, command_type: str, **kwargs) -> ComposeCommand:
+        """
+        为指定节点构建Docker Compose命令
+
+        Args:
+            node_name: 节点名称
+            command_type: 命令类型 (up/down/stop/logs等)
+            **kwargs: 命令参数
+
+        Returns:
+            构建的命令对象
+        """
+        node = self.get_node(node_name)
+        if not node:
+            raise ValueError(f"Node not found: {node_name}")
+
+        return self.compose_adapter_manager.build_command(
+            node_name=node_name,
+            command_type=command_type,
+            forced_version=node.docker_compose_version,
+            **kwargs
+        )
+
+    def get_compose_version_info(self, node_names: List[str] = None) -> Dict[str, Dict[str, Any]]:
+        """
+        获取节点的Docker Compose版本信息
+
+        Args:
+            node_names: 节点名称列表，为空则获取所有节点信息
+
+        Returns:
+            节点版本信息字典
+        """
+        if node_names is None:
+            node_names = list(self.nodes.keys())
+
+        # 构建强制版本映射
+        forced_versions = {}
+        for node_name in node_names:
+            node = self.get_node(node_name)
+            if node:
+                forced_versions[node_name] = node.docker_compose_version
+
+        return self.compose_adapter_manager.detect_all_versions(node_names, forced_versions)
+
+    def execute_compose_command(self, node_names: List[str], command_type: str,
+                               timeout: int = 300, **kwargs) -> Dict[str, Tuple[int, str, str]]:
+        """
+        在多个节点上执行Docker Compose命令
+
+        Args:
+            node_names: 节点名称列表
+            command_type: 命令类型
+            timeout: 超时时间
+            **kwargs: 命令参数
+
+        Returns:
+            执行结果字典
+        """
+        results = {}
+
+        for node_name in node_names:
+            try:
+                node = self.get_node(node_name)
+                if not node:
+                    results[node_name] = (-1, "", f"Node not found: {node_name}")
+                    continue
+
+                # 构建适配的命令
+                compose_cmd = self.build_compose_command(node_name, command_type, **kwargs)
+
+                # 切换到工作目录并执行
+                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
+
+                self.logger.info(f"Executing compose command on {node_name}: {compose_cmd.full_cmd}")
+                cmd_results = self.execute_command(full_cmd, [node_name], timeout=timeout)
+
+                node_result = cmd_results.get(node_name, (-1, "", "No result"))
+                results[node_name] = node_result
+
+                if node_result[0] == 0:
+                    self.logger.info(f"Compose command succeeded on {node_name}")
+                else:
+                    self.logger.error(f"Compose command failed on {node_name}: {node_result[2]}")
+
+            except Exception as e:
+                self.logger.error(f"Error executing compose command on {node_name}: {e}")
+                results[node_name] = (-1, "", str(e))
+
+        return results

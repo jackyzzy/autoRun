@@ -106,33 +106,37 @@ class DockerComposeManager:
             node_names = [node.name for node in nodes]
         
         self.logger.info(f"Starting services on {len(node_names)} nodes")
-        
-        # 构建docker compose命令
-        cmd_parts = ["docker", "compose", "-f", Path(compose_file).name]
-        if detach:
-            cmd_parts.append("-d")
-        cmd_parts.append("up")
-        
-        if services:
-            cmd_parts.extend(services)
-            self.logger.info(f"Starting specific services: {services}")
-        else:
-            self.logger.info("Starting all services")
-        
-        compose_cmd = " ".join(cmd_parts)
-        
+
         results = {}
         for node_name in node_names:
             node = self.node_manager.get_node(node_name)
             if not node:
                 results[node_name] = False
                 continue
-            
+
             try:
+                # 使用适配器构建compose命令
+                compose_cmd = self.node_manager.build_compose_command(
+                    node_name=node_name,
+                    command_type="up",
+                    file=compose_file,
+                    services=services or []
+                )
+
+                # 添加detach参数处理
+                if detach:
+                    # 适配器已经包含-d参数，这里无需额外处理
+                    pass
+
                 # 切换到工作目录并执行命令
-                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd}"
-                
-                self.logger.info(f"Executing on {node_name}: {compose_cmd}")
+                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
+
+                if services:
+                    self.logger.info(f"Starting specific services on {node_name}: {services}")
+                else:
+                    self.logger.info(f"Starting all services on {node_name}")
+
+                self.logger.info(f"Executing on {node_name}: {compose_cmd.full_cmd}")
                 cmd_results = self.node_manager.execute_command(
                     full_cmd, [node_name], timeout=timeout
                 )
@@ -177,31 +181,36 @@ class DockerComposeManager:
         
         self.logger.info(f"Stopping services on {len(node_names)} nodes")
         
-        # 构建docker compose命令
-        cmd_parts = ["docker", "compose", "-f", Path(compose_file).name]
-        
-        if services:
-            # 停止特定服务
-            cmd_parts.extend(["stop"] + services)
-            self.logger.info(f"Stopping specific services: {services}")
-        else:
-            # 停止所有服务
-            cmd_parts.append("down")
-            if remove_volumes:
-                cmd_parts.append("-v")
-            self.logger.info("Stopping all services")
-        
-        compose_cmd = " ".join(cmd_parts)
-        
         results = {}
         for node_name in node_names:
             node = self.node_manager.get_node(node_name)
             if not node:
                 results[node_name] = False
                 continue
-            
+
             try:
-                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd}"
+                if services:
+                    # 停止特定服务
+                    compose_cmd = self.node_manager.build_compose_command(
+                        node_name=node_name,
+                        command_type="stop",
+                        file=compose_file,
+                        services=services
+                    )
+                    self.logger.info(f"Stopping specific services on {node_name}: {services}")
+                else:
+                    # 停止所有服务 - 使用down命令
+                    compose_cmd = self.node_manager.build_compose_command(
+                        node_name=node_name,
+                        command_type="down",
+                        file=compose_file
+                    )
+                    # 如果需要删除卷，修改命令
+                    if remove_volumes:
+                        compose_cmd.full_cmd += " -v"
+                    self.logger.info(f"Stopping all services on {node_name}")
+
+                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
                 
                 self.logger.info(f"Executing on {node_name}: {compose_cmd}")
                 cmd_results = self.node_manager.execute_command(
@@ -311,21 +320,28 @@ class DockerComposeManager:
             nodes = self.node_manager.get_nodes(enabled_only=True)
             node_names = [node.name for node in nodes]
         
-        # 构建日志命令
-        log_cmd = f"docker compose -f {Path(compose_file).name} logs --tail {lines}"
-        if follow:
-            log_cmd += " -f"
-        log_cmd += f" {service_name}"
-        
         results = {}
         for node_name in node_names:
             node = self.node_manager.get_node(node_name)
             if not node:
                 results[node_name] = ""
                 continue
-            
+
             try:
-                full_cmd = f"cd {node.docker_compose_path} && {log_cmd}"
+                # 使用适配器构建日志命令
+                compose_cmd = self.node_manager.build_compose_command(
+                    node_name=node_name,
+                    command_type="logs",
+                    file=compose_file,
+                    lines=str(lines),
+                    services=[service_name]
+                )
+
+                # 添加follow参数处理
+                if follow:
+                    compose_cmd.full_cmd += " -f"
+
+                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
                 cmd_results = self.node_manager.execute_command(
                     full_cmd, [node_name], timeout=60
                 )
@@ -361,18 +377,25 @@ class DockerComposeManager:
             node_names = [node.name for node in nodes]
         
         self.logger.info(f"Scaling service {service_name} to {replicas} replicas on {len(node_names)} nodes")
-        
-        scale_cmd = f"docker compose -f {Path(compose_file).name} up -d --scale {service_name}={replicas}"
-        
+
         results = {}
         for node_name in node_names:
             node = self.node_manager.get_node(node_name)
             if not node:
                 results[node_name] = False
                 continue
-            
+
             try:
-                full_cmd = f"cd {node.docker_compose_path} && {scale_cmd}"
+                # 使用适配器构建扩缩容命令
+                compose_cmd = self.node_manager.build_compose_command(
+                    node_name=node_name,
+                    command_type="scale",
+                    file=compose_file,
+                    service=service_name,
+                    replicas=str(replicas)
+                )
+
+                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
                 cmd_results = self.node_manager.execute_command(
                     full_cmd, [node_name], timeout=180
                 )

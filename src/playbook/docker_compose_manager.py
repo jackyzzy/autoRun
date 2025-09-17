@@ -205,14 +205,16 @@ class DockerComposeManager:
                     self.logger.error(f"Failed to upload compose file to {node_name}")
                     return False
                 
-                # 在节点上启动服务
-                commands = [
-                    f"cd {node.docker_compose_path}",
-                    f"docker compose -f {service.compose_file} up -d {service.name}"
-                ]
-                
-                command = " && ".join(commands)
-                results = self.node_manager.execute_command(command, [node_name], timeout=timeout)
+                # 在节点上启动服务 - 使用适配器构建命令
+                compose_cmd = self.node_manager.build_compose_command(
+                    node_name=node_name,
+                    command_type="up",
+                    file=service.compose_file,
+                    services=[service.name]
+                )
+
+                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
+                results = self.node_manager.execute_command(full_cmd, [node_name], timeout=timeout)
                 
                 node_result = results.get(node_name)
                 if node_result and node_result[0] == 0:
@@ -241,15 +243,23 @@ class DockerComposeManager:
                 self.logger.error(f"Node {node_name} not found")
                 return False
             
-            # 停止服务
-            commands = [
-                f"cd {node.docker_compose_path}",
-                f"docker compose -f {service.compose_file} stop {service.name}",
-                f"docker compose -f {service.compose_file} rm -f {service.name}"
-            ]
-            
-            command = " && ".join(commands)
-            results = self.node_manager.execute_command(command, [node_name], timeout=timeout)
+            # 停止服务 - 使用适配器构建命令
+            stop_cmd = self.node_manager.build_compose_command(
+                node_name=node_name,
+                command_type="stop",
+                file=service.compose_file,
+                services=[service.name]
+            )
+
+            rm_cmd = self.node_manager.build_compose_command(
+                node_name=node_name,
+                command_type="rm",
+                file=service.compose_file,
+                services=[service.name]
+            )
+
+            full_cmd = f"cd {node.docker_compose_path} && {stop_cmd.full_cmd} && {rm_cmd.full_cmd}"
+            results = self.node_manager.execute_command(full_cmd, [node_name], timeout=timeout)
             
             node_result = results.get(node_name)
             if node_result and node_result[0] == 0:
@@ -321,10 +331,30 @@ class DockerComposeManager:
     
     def cleanup_node_compose_files(self, node_names: List[str]):
         """清理节点上的compose文件"""
-        cleanup_commands = [
-            "docker compose down --remove-orphans",
-            "docker system prune -f"
-        ]
+        # 使用第一个节点构建down命令（假设所有节点版本相同，或者使用通用命令）
+        if node_names:
+            first_node = node_names[0]
+            try:
+                down_cmd = self.node_manager.build_compose_command(
+                    node_name=first_node,
+                    command_type="down",
+                    file="docker-compose.yml"  # 使用通用文件名
+                )
+                cleanup_commands = [
+                    down_cmd.full_cmd.replace("docker-compose.yml", "*compose*.yml") + " --remove-orphans || true",
+                    "docker system prune -f"
+                ]
+            except Exception as e:
+                self.logger.warning(f"Failed to build adaptive down command, using default: {e}")
+                cleanup_commands = [
+                    "docker compose down --remove-orphans || docker-compose down --remove-orphans || true",
+                    "docker system prune -f"
+                ]
+        else:
+            cleanup_commands = [
+                "docker compose down --remove-orphans || docker-compose down --remove-orphans || true",
+                "docker system prune -f"
+            ]
         
         for cmd in cleanup_commands:
             try:

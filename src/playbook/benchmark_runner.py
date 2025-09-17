@@ -458,14 +458,26 @@ class BenchmarkRunner:
         
         self.logger.info(f"Validating test environment on {len(node_names)} nodes")
         
+        # 使用适配器获取compose版本命令
         validation_commands = {
             'docker_version': 'docker --version',
-            'docker_compose_version': 'docker compose version',
             'gpu_info': 'nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits || echo "No GPU"',
             'disk_space': 'df -h /',
             'memory_info': 'free -h',
             'benchmark_image': f'docker images | grep aicp-benchmark || echo "Image not found"'
         }
+
+        # 为每个节点添加适配的compose版本检查命令
+        for node_name in node_names:
+            try:
+                compose_cmd = self.node_manager.build_compose_command(
+                    node_name=node_name,
+                    command_type="version"
+                )
+                validation_commands[f'docker_compose_version_{node_name}'] = compose_cmd.full_cmd
+            except Exception as e:
+                self.logger.warning(f"Failed to build compose version command for {node_name}: {e}")
+                validation_commands[f'docker_compose_version_{node_name}'] = 'docker compose version || docker-compose version || echo "No Compose"'
         
         results = {}
         
