@@ -167,7 +167,7 @@ class ScenarioRunner:
                 
                 # 场景间等待
                 if i < len(execution_order) - 1 and self.wait_between_scenarios > 0:
-                    self.logger.info(f"Waiting {self.wait_between_scenarios} seconds before next scenario")
+                    self.logger.info(f"Waiting {self.wait_between_scenarios} seconds before next scenario\n\n")
                     time.sleep(self.wait_between_scenarios)
             
             self.logger.info("All scenarios execution completed")

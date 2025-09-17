@@ -4,13 +4,15 @@
 
 ## 🚀 核心功能
 
-- **分布式节点管理**: 通过SSH管理多个测试节点
-- **场景化测试**: 支持完全可配置的测试场景和执行顺序
-- **Docker服务管理**: 远程管理推理服务的启动和停止
-- **基准测试执行**: 集成AICP基准测试，支持多种测试配置
-- **结果自动收集**: 从各节点收集测试数据并按场景归档
-- **健康状态监控**: 全面的系统健康检查和容错机制
-- **丰富的CLI工具**: 命令行界面方便操作和监控
+- **分布式节点管理**: 通过SSH管理多个测试节点，支持连接池和自动重连
+- **场景化测试**: 支持完全可配置的测试场景和执行顺序，三种执行模式
+- **Docker服务管理**: 远程管理推理服务的启动和停止，支持Docker Compose版本自适应
+- **基准测试执行**: 集成AICP基准测试，支持多种测试配置和并行执行
+- **结果自动收集**: 从各节点收集测试数据并按场景归档，支持多种输出格式
+- **健康状态监控**: 全面的系统健康检查和容错机制，支持自动恢复
+- **丰富的CLI工具**: 命令行界面方便操作和监控，支持详细模式和干运行
+- **智能版本适配**: 自动检测Docker Compose版本(V1/V2)并适配相应命令
+- **强化错误处理**: 完善的异常处理和重试机制，提高系统稳定性
 
 ## 📁 项目结构
 
@@ -33,7 +35,18 @@ test_playbook/
 │   └── README.md           # 模板使用说明
 ├── src/                     # 源代码
 │   ├── playbook/           # 核心模块
+│   │   ├── core.py         # 核心控制器
+│   │   ├── node_manager.py # 节点管理
+│   │   ├── scenario_*.py   # 场景管理和执行
+│   │   ├── docker_*.py     # Docker服务管理
+│   │   ├── benchmark_runner.py # 基准测试执行
+│   │   ├── result_collector.py # 结果收集
+│   │   └── health_checker.py   # 健康检查
 │   └── utils/              # 工具模块
+│       ├── ssh_client.py   # SSH连接工具
+│       ├── config_loader.py # 配置加载器
+│       ├── logger.py       # 日志工具
+│       └── docker_compose_adapter.py # Docker Compose版本适配
 ├── logs/                    # 日志文件
 └── results/                # 测试结果
 ```
@@ -270,9 +283,28 @@ inter_scenario:
   retry_count: 1
 ```
 
+### Docker Compose版本自适应
+
+系统自动检测节点上的Docker Compose版本(V1或V2)并适配相应的命令格式：
+```bash
+# 自动检测并使用相应版本
+# V1: docker-compose -f file.yml up -d
+# V2: docker compose -f file.yml up -d
+```
+
+### 并行执行和性能优化
+
+- **连接池管理**: 智能SSH连接复用，减少连接开销
+- **并行健康检查**: 同时检查多个节点状态
+- **智能重试**: 基于错误类型的差异化重试策略
+- **缓存机制**: 缓存版本检测和配置验证结果
+
 ### 自动恢复
 
-健康检查器支持自动恢复机制，可以在检测到问题时自动尝试修复。
+健康检查器支持自动恢复机制，可以在检测到问题时自动尝试修复：
+- Docker服务自动重启
+- SSH连接自动重连
+- 失败节点的隔离和恢复
 
 ## 📋 最佳实践
 
@@ -304,8 +336,16 @@ inter_scenario:
 # 健康检查
 ./playbook.py health
 
-# 干运行
+# 干运行 - 验证配置但不执行
 ./playbook.py run --dry-run
+
+# 运行单个场景并详细输出
+./playbook.py --verbose run baseline_test
+
+# 查看结果的不同格式
+./playbook.py results --format json
+./playbook.py results --format yaml
+./playbook.py results --format table
 ```
 
 ## 📈 性能优化建议

@@ -1,6 +1,21 @@
-"""
-节点管理器
-管理多个分布式节点的SSH连接和操作
+"""节点管理器
+
+管理多个分布式节点的SSH连接和操作，提供节点配置加载、连接管理、
+命令执行等功能。支持节点池化管理和连接复用。
+
+主要功能:
+    - 从YAML配置文件加载节点信息
+    - 管理SSH连接池和连接生命周期
+    - 提供统一的远程命令执行接口
+    - 支持并发操作多个节点
+    - 集成Docker Compose版本适配
+    - 节点健康状态监控和连接测试
+
+典型用法:
+    >>> manager = NodeManager("config/nodes.yaml")
+    >>> nodes = manager.get_nodes(enabled_only=True)
+    >>> results = manager.execute_command("ls /", [node.name for node in nodes])
+    >>> connectivity = manager.test_connectivity([node.name for node in nodes])
 """
 
 import logging
@@ -11,10 +26,43 @@ from pathlib import Path
 
 from ..utils.ssh_client import SSHClient, ssh_pool, SSHConnectionError, SSHExecutionError
 from ..utils.docker_compose_adapter import DockerComposeAdapterManager, ComposeCommand
+from ..utils.common import (
+    setup_module_logger, load_yaml_config, validate_required_fields,
+    retry_on_failure, ContextTimer
+)
 
 
 class Node:
-    """节点信息类"""
+    """节点信息类
+
+    封装单个节点的配置信息和连接参数。
+
+    Attributes:
+        name: 节点名称，用作唯一标识符
+        host: 节点主机地址或IP
+        username: SSH连接用户名
+        password: SSH连接密码（可选）
+        key_filename: SSH私钥文件路径（可选）
+        port: SSH连接端口，默认22
+        tags: 节点标签列表，用于分组和过滤
+        role: 节点角色，如'master', 'worker'等
+        enabled: 是否启用此节点
+        docker_compose_path: Docker Compose文件路径
+        results_path: 测试结果存储路径
+        env_vars: 环境变量映射
+
+    Examples:
+        >>> config = {
+        ...     'host': '192.168.1.100',
+        ...     'username': 'ubuntu',
+        ...     'password': 'secret',
+        ...     'enabled': True,
+        ...     'tags': ['gpu', 'high-mem']
+        ... }
+        >>> node = Node('node1', config)
+        >>> print(f"{node.name}: {node.host}")
+        node1: 192.168.1.100
+    """
     
     def __init__(self, name: str, config: Dict[str, Any]):
         self.name = name
@@ -63,7 +111,7 @@ class NodeManager:
     """节点管理器"""
     
     def __init__(self, config_file: str = None):
-        self.logger = logging.getLogger("playbook.node_manager")
+        self.logger = setup_module_logger("playbook.node_manager")
         self.nodes: Dict[str, Node] = {}
         self.config_file = config_file
 
@@ -75,23 +123,25 @@ class NodeManager:
     
     def load_config(self, config_file: str):
         """加载节点配置"""
-        try:
-            with open(config_file, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-            
+        with ContextTimer(self.logger, f"Loading node configuration from {config_file}"):
+            config = load_yaml_config(config_file, required=True)
+
             self.nodes.clear()
             nodes_config = config.get('nodes', {})
-            
+
             for node_name, node_config in nodes_config.items():
+                # 验证必需字段
+                validate_required_fields(
+                    node_config,
+                    ['host', 'username'],
+                    f"node '{node_name}'"
+                )
+
                 node = Node(node_name, node_config)
                 self.nodes[node_name] = node
-                self.logger.info(f"Loaded node: {node_name} ({node.host})")
-            
-            self.logger.info(f"Loaded {len(self.nodes)} nodes from {config_file}")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to load node config: {e}")
-            raise
+                self.logger.debug(f"Loaded node: {node_name} ({node.host})")
+
+            self.logger.info(f"Successfully loaded {len(self.nodes)} nodes")
     
     def add_node(self, name: str, host: str, username: str, **kwargs) -> Node:
         """添加节点"""

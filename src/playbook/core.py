@@ -4,9 +4,11 @@ Playbook核心模块
 """
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union, Tuple
 from pathlib import Path
 import os
+from dataclasses import dataclass
+from enum import Enum
 
 from .node_manager import NodeManager
 from .scenario_manager import ScenarioManager
@@ -15,17 +17,61 @@ from .docker_manager import DockerComposeManager
 from .benchmark_runner import BenchmarkRunner, TestResult
 from .result_collector import ResultCollector, ResultSummary
 from .health_checker import HealthChecker, HealthStatus
+from .exceptions import (
+    PlaybookException, ConfigurationError, ScenarioError,
+    NodeOperationError, TestExecutionError, wrap_exception
+)
 from ..utils.logger import setup_logging
+from ..utils.config_validator import ConfigValidator
+
+
+class SystemStatus(Enum):
+    """系统状态枚举"""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+    UNKNOWN = "unknown"
+    ERROR = "error"
+
+
+@dataclass
+class ExecutionResult:
+    """执行结果数据类"""
+    status: str
+    message: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+    @property
+    def is_success(self) -> bool:
+        """检查是否执行成功"""
+        return self.status in ['completed', 'success']
 
 
 class PlaybookCore:
-    """Playbook核心类，集成所有功能模块"""
-    
-    def __init__(self, 
-                 config_dir: str = "config",
-                 scenarios_dir: str = "config/scenarios",
-                 results_dir: str = "results",
-                 log_level: str = "INFO"):
+    """Playbook核心类，集成所有功能模块
+
+    这个类是整个系统的入口点，负责协调各个组件的工作，
+    提供统一的API接口供CLI和其他客户端使用。
+
+    Attributes:
+        config_dir: 配置文件目录
+        scenarios_dir: 场景目录
+        results_dir: 结果目录
+        node_manager: 节点管理器实例
+        scenario_manager: 场景管理器实例
+        docker_manager: Docker管理器实例
+        benchmark_runner: 基准测试执行器实例
+        result_collector: 结果收集器实例
+        health_checker: 健康检查器实例
+        scenario_runner: 场景执行器实例
+    """
+
+    def __init__(self,
+                 config_dir: Union[str, Path] = "config",
+                 scenarios_dir: Union[str, Path] = "config/scenarios",
+                 results_dir: Union[str, Path] = "results",
+                 log_level: str = "INFO") -> None:
         """
         初始化Playbook核心
         
@@ -49,43 +95,65 @@ class PlaybookCore:
         
         self.logger.info("Playbook core initialized successfully")
     
-    def _init_components(self):
+    def _init_components(self) -> None:
         """初始化各个组件"""
         try:
             # 节点管理器
             nodes_config = self.config_dir / "nodes.yaml"
+            if not nodes_config.exists():
+                self.logger.warning(f"Node configuration file not found: {nodes_config}")
             self.node_manager = NodeManager(str(nodes_config) if nodes_config.exists() else None)
-            
+
             # 场景管理器
             scenarios_config = self.config_dir / "scenarios.yaml"
+            if not scenarios_config.exists():
+                self.logger.warning(f"Scenario configuration file not found: {scenarios_config}")
             self.scenario_manager = ScenarioManager(
                 str(scenarios_config) if scenarios_config.exists() else None,
                 str(self.scenarios_dir)
             )
-            
+
             # Docker管理器
             self.docker_manager = DockerComposeManager(self.node_manager)
-            
+
             # 基准测试执行器
             self.benchmark_runner = BenchmarkRunner(self.node_manager)
-            
+
             # 结果收集器
             self.result_collector = ResultCollector(self.node_manager, str(self.results_dir))
-            
+
             # 健康检查器
             self.health_checker = HealthChecker(self.node_manager, self.docker_manager)
-            
+
             # 场景执行器
             self.scenario_runner = ScenarioRunner(self.scenario_manager, self.node_manager)
-            
+
             # 设置场景执行器回调
             self._setup_scenario_callbacks()
-            
+
+        except FileNotFoundError as e:
+            raise ConfigurationError(
+                f"Required configuration file not found: {e.filename}",
+                error_code="CONFIG_FILE_NOT_FOUND",
+                details={'missing_file': str(e.filename)},
+                original_exception=e
+            )
+        except PermissionError as e:
+            raise ConfigurationError(
+                f"Permission denied accessing configuration: {e.filename}",
+                error_code="CONFIG_PERMISSION_DENIED",
+                details={'file': str(e.filename)},
+                original_exception=e
+            )
         except Exception as e:
             self.logger.error(f"Failed to initialize components: {e}")
-            raise
+            raise ConfigurationError(
+                f"Component initialization failed: {str(e)}",
+                error_code="COMPONENT_INIT_FAILED",
+                original_exception=e
+            )
     
-    def _setup_scenario_callbacks(self):
+    def _setup_scenario_callbacks(self) -> None:
         """设置场景执行器回调函数"""
         def on_scenario_start(scenario_name: str):
             self.logger.info(f"Scenario started: {scenario_name}")
@@ -101,10 +169,10 @@ class PlaybookCore:
         self.scenario_runner.on_scenario_complete = on_scenario_complete
         self.scenario_runner.on_all_complete = on_all_complete
     
-    def run_full_test_suite(self) -> Dict[str, Any]:
+    def run_full_test_suite(self) -> ExecutionResult:
         """
         运行完整的测试套件
-        
+
         Returns:
             测试执行结果摘要
         """
@@ -164,50 +232,63 @@ class PlaybookCore:
             execution_summary = self.scenario_runner.get_execution_summary()
             health_report = self.health_checker.get_health_report()
             
-            final_results = {
-                'status': 'completed',
+            execution_data = {
                 'execution_summary': execution_summary,
                 'health_report': health_report,
                 'scenario_summaries': {name: summary.to_dict() for name, summary in all_summaries.items()},
                 'validation_results': validation_results
             }
-            
+
             self.logger.info("\n\nFull test suite execution completed successfully")
-            return final_results
+            return ExecutionResult(
+                status='completed',
+                message="Full test suite execution completed successfully",
+                data=execution_data
+            )
             
         except Exception as e:
             self.logger.error(f"Full test suite execution failed: {e}")
-            return {
-                'status': 'failed',
-                'error': str(e),
-                'execution_summary': self.scenario_runner.get_execution_summary(),
-                'health_report': self.health_checker.get_health_report()
-            }
+            return ExecutionResult(
+                status='failed',
+                error=str(e),
+                data={
+                    'execution_summary': self.scenario_runner.get_execution_summary(),
+                    'health_report': self.health_checker.get_health_report()
+                }
+            )
     
-    def run_single_scenario(self, scenario_name: str) -> Dict[str, Any]:
+    def run_single_scenario(self, scenario_name: str) -> ExecutionResult:
         """
         运行单个场景
-        
+
         Args:
             scenario_name: 场景名称
-            
+
         Returns:
             场景执行结果
         """
         self.logger.info(f"Running single scenario: {scenario_name}")
         
-        scenario = self.scenario_manager.get_scenario(scenario_name)
-        if not scenario:
-            return {
-                'status': 'failed',
-                'error': f'Scenario not found: {scenario_name}'
-            }
+        try:
+            scenario = self.scenario_manager.get_scenario(scenario_name)
+            if not scenario:
+                return ExecutionResult(
+                    status='failed',
+                    error=f'Scenario not found: {scenario_name}',
+                    data={'available_scenarios': list(self.scenario_manager.get_scenarios().keys())}
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to load scenario {scenario_name}: {e}")
+            return ExecutionResult(
+                status='failed',
+                error=f"Failed to load scenario: {str(e)}"
+            )
         
         if not scenario.enabled:
-            return {
-                'status': 'skipped',
-                'reason': 'Scenario is disabled'
-            }
+            return ExecutionResult(
+                status='skipped',
+                message='Scenario is disabled'
+            )
         
         try:
             # 运行场景
@@ -230,24 +311,34 @@ class PlaybookCore:
                     scenario_name, test_results, node_names
                 )
                 
-                return {
-                    'status': 'completed',
-                    'scenario_result': result.to_dict(),
-                    'result_summary': summary.to_dict()
-                }
+                return ExecutionResult(
+                    status='completed',
+                    message='Scenario completed successfully',
+                    data={
+                        'scenario_result': result.to_dict(),
+                        'result_summary': summary.to_dict()
+                    }
+                )
             else:
-                return {
-                    'status': 'failed',
-                    'scenario_result': result.to_dict(),
-                    'error': result.error_message
-                }
+                return ExecutionResult(
+                    status='failed',
+                    error=result.error_message,
+                    data={'scenario_result': result.to_dict()}
+                )
                 
+        except PlaybookException as e:
+            self.logger.error(f"Playbook error running scenario {scenario_name}: {e}")
+            return ExecutionResult(
+                status='failed',
+                error=str(e),
+                data=e.to_dict()
+            )
         except Exception as e:
-            self.logger.error(f"Error running scenario {scenario_name}: {e}")
-            return {
-                'status': 'failed',
-                'error': str(e)
-            }
+            self.logger.error(f"Unexpected error running scenario {scenario_name}: {e}")
+            return ExecutionResult(
+                status='failed',
+                error=f"Unexpected error: {str(e)}"
+            )
     
     def get_system_status(self) -> Dict[str, Any]:
         """获取系统状态"""
@@ -274,11 +365,18 @@ class PlaybookCore:
                 'current_scenario': self.scenario_runner.current_scenario
             }
             
-        except Exception as e:
-            self.logger.error(f"Error getting system status: {e}")
+        except PlaybookException as e:
+            self.logger.error(f"Playbook error getting system status: {e}")
             return {
                 'overall_status': 'error',
-                'error': str(e)
+                'error': str(e),
+                'error_details': e.to_dict()
+            }
+        except Exception as e:
+            self.logger.error(f"Unexpected error getting system status: {e}")
+            return {
+                'overall_status': 'error',
+                'error': f"Unexpected error: {str(e)}"
             }
     
     def list_scenarios(self) -> Dict[str, Any]:
@@ -343,51 +441,110 @@ class PlaybookCore:
         results = {
             'overall_valid': True,
             'issues': [],
-            'warnings': []
+            'warnings': [],
+            'security_issues': [],
+            'suggestions': []
         }
-        
+
         try:
-            # 验证场景
+            # 创建配置验证器
+            validator = ConfigValidator()
+            validation_results = []
+
+            # 验证节点配置文件
+            nodes_config = self.config_dir / "nodes.yaml"
+            if nodes_config.exists():
+                self.logger.info("Validating nodes configuration...")
+                nodes_result = validator.validate_nodes_config(nodes_config)
+                validation_results.append(nodes_result)
+
+                results['issues'].extend(nodes_result.errors)
+                results['warnings'].extend(nodes_result.warnings)
+                results['security_issues'].extend(nodes_result.security_issues)
+                results['suggestions'].extend(nodes_result.suggestions)
+
+                if not nodes_result.is_valid:
+                    results['overall_valid'] = False
+            else:
+                results['warnings'].append(f"Nodes configuration file not found: {nodes_config}")
+
+            # 验证场景配置文件
+            scenarios_config = self.config_dir / "scenarios.yaml"
+            if scenarios_config.exists():
+                self.logger.info("Validating scenarios configuration...")
+                scenarios_result = validator.validate_scenarios_config(scenarios_config)
+                validation_results.append(scenarios_result)
+
+                results['issues'].extend(scenarios_result.errors)
+                results['warnings'].extend(scenarios_result.warnings)
+                results['security_issues'].extend(scenarios_result.security_issues)
+                results['suggestions'].extend(scenarios_result.suggestions)
+
+                if not scenarios_result.is_valid:
+                    results['overall_valid'] = False
+            else:
+                results['warnings'].append(f"Scenarios configuration file not found: {scenarios_config}")
+
+            # 验证场景内容
             scenario_validation = self.scenario_manager.validate_scenarios()
             if scenario_validation['invalid']:
                 results['issues'].extend([
                     f"Invalid scenario: {name}" for name in scenario_validation['invalid']
                 ])
                 results['overall_valid'] = False
-            
+
             if scenario_validation['missing_dependencies']:
                 results['warnings'].extend([
                     f"Missing dependencies: {dep}" for dep in scenario_validation['missing_dependencies']
                 ])
-            
+
             # 验证节点连接
             nodes = self.node_manager.get_nodes(enabled_only=True)
             if not nodes:
                 results['issues'].append("No enabled nodes configured")
                 results['overall_valid'] = False
             else:
+                self.logger.info("Testing node connectivity...")
                 connectivity = self.node_manager.test_connectivity([node.name for node in nodes])
                 failed_nodes = [name for name, connected in connectivity.items() if not connected]
                 if failed_nodes:
                     results['warnings'].extend([
                         f"Cannot connect to node: {name}" for name in failed_nodes
                     ])
-            
+
             # 验证目录结构
             if not self.scenarios_dir.exists():
                 results['issues'].append(f"Scenarios directory not found: {self.scenarios_dir}")
                 results['overall_valid'] = False
-            
+
+            # 生成安全报告
+            if validation_results:
+                security_report = validator.generate_security_report(validation_results)
+                results['security_report'] = security_report
+
+                # 检查是否有严重安全问题
+                if security_report['summary']['critical_issues'] > 0:
+                    results['overall_valid'] = False
+                    results['issues'].append(
+                        f"Found {security_report['summary']['critical_issues']} critical security issues"
+                    )
+
             self.logger.info(f"Configuration validation completed: valid={results['overall_valid']}")
-            
-        except Exception as e:
+
+        except PlaybookException as e:
             results['overall_valid'] = False
             results['issues'].append(f"Validation error: {str(e)}")
             self.logger.error(f"Configuration validation failed: {e}")
-        
+            if hasattr(e, 'to_dict'):
+                results['error_details'] = e.to_dict()
+        except Exception as e:
+            results['overall_valid'] = False
+            results['issues'].append(f"Unexpected validation error: {str(e)}")
+            self.logger.error(f"Configuration validation failed unexpectedly: {e}")
+
         return results
     
-    def cleanup(self):
+    def cleanup(self) -> None:
         """清理资源"""
         try:
             self.logger.info("Cleaning up resources")
@@ -404,8 +561,8 @@ class PlaybookCore:
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
     
-    def __enter__(self):
+    def __enter__(self) -> 'PlaybookCore':
         return self
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[Any]) -> None:
         self.cleanup()

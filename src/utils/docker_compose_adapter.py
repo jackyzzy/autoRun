@@ -1,6 +1,20 @@
-"""
-Docker Compose版本适配器
-自动检测并适配不同版本的Docker Compose命令
+"""Docker Compose版本适配器
+
+这个模块提供了自动检测并适配不同版本的Docker Compose命令的功能。
+支持Docker Compose V1 (docker-compose) 和 V2 (docker compose) 的自动切换。
+
+主要功能:
+    - 自动检测节点上的Docker Compose版本
+    - 适配不同版本的命令格式
+    - 缓存检测结果以提高性能
+    - 支持强制指定版本
+    - 统一的命令构建接口
+
+典型用法:
+    >>> adapter = DockerComposeAdapter("node1", ssh_executor_func)
+    >>> cmd = adapter.build_command("up", file="docker-compose.yml", services=["app"])
+    >>> print(cmd.full_cmd)
+    'docker compose -f docker-compose.yml up -d app'
 """
 
 import logging
@@ -12,7 +26,16 @@ import time
 
 
 class DockerComposeVersion(Enum):
-    """Docker Compose版本枚举"""
+    """Docker Compose版本枚举
+
+    定义支持的Docker Compose版本类型。
+
+    Attributes:
+        V1: Docker Compose V1 版本 (docker-compose 命令)
+        V2: Docker Compose V2 版本 (docker compose 命令)
+        UNKNOWN: 未知版本或检测失败
+        AUTO: 自动检测版本模式
+    """
     V1 = "v1"  # docker-compose
     V2 = "v2"  # docker compose
     UNKNOWN = "unknown"
@@ -21,7 +44,24 @@ class DockerComposeVersion(Enum):
 
 @dataclass
 class ComposeCommand:
-    """Docker Compose命令封装"""
+    """Docker Compose命令封装
+
+    封装构建好的Docker Compose命令及其相关信息。
+
+    Attributes:
+        base_cmd: 基础命令 (如 'docker-compose' 或 'docker compose')
+        full_cmd: 完整的命令字符串
+        version: 使用的Docker Compose版本
+
+    Examples:
+        >>> cmd = ComposeCommand(
+        ...     base_cmd="docker compose",
+        ...     full_cmd="docker compose -f app.yml up -d",
+        ...     version=DockerComposeVersion.V2
+        ... )
+        >>> str(cmd)
+        'docker compose -f app.yml up -d'
+    """
     base_cmd: str
     full_cmd: str
     version: DockerComposeVersion
@@ -31,7 +71,34 @@ class ComposeCommand:
 
 
 class DockerComposeAdapter:
-    """Docker Compose版本适配器"""
+    """Docker Compose版本适配器
+
+    为单个节点提供Docker Compose版本检测和命令构建功能。
+    支持自动检测节点上的Docker Compose版本并生成相应格式的命令。
+
+    该类会缓存检测结果以提高性能，并支持强制指定版本。
+    当检测失败时会采用降级策略。
+
+    Attributes:
+        node_name: 目标节点名称
+        ssh_executor: SSH命令执行函数
+        forced_version: 强制指定的版本
+        cache_ttl: 缓存有效期（秒）
+
+    Examples:
+        >>> def ssh_executor(cmd, nodes, **kwargs):
+        ...     # 模拟SSH执行
+        ...     return {nodes[0]: (0, "Docker Compose version v2.10.0", "")}
+        >>>
+        >>> adapter = DockerComposeAdapter("node1", ssh_executor)
+        >>> version = adapter.detect_version()
+        >>> print(version)
+        DockerComposeVersion.V2
+        >>>
+        >>> cmd = adapter.build_command("up", file="app.yml", services=["web"])
+        >>> print(cmd.full_cmd)
+        'docker compose -f app.yml up -d web'
+    """
 
     # 命令模板映射
     COMMAND_TEMPLATES = {
@@ -94,14 +161,27 @@ class DockerComposeAdapter:
         self.logger = logging.getLogger(f"docker_compose_adapter.{node_name}")
 
     def detect_version(self, force_refresh: bool = False) -> DockerComposeVersion:
-        """
-        检测Docker Compose版本
+        """检测Docker Compose版本
+
+        通过执行版本命令来检测节点上安装的Docker Compose版本。
+        优先检测V2版本，然后检测V1版本。检测结果会被缓存。
 
         Args:
-            force_refresh: 强制刷新检测结果
+            force_refresh: 是否强制重新检测，忽略缓存。默认为False。
 
         Returns:
-            检测到的版本
+            检测到的Docker Compose版本。如果检测失败返回UNKNOWN。
+
+        Note:
+            - 如果设置了forced_version且不是AUTO，直接返回强制版本
+            - 检测结果会缓存cache_ttl秒，避免重复检测
+            - 优先级: V2 > V1 > UNKNOWN
+
+        Examples:
+            >>> adapter = DockerComposeAdapter("node1", ssh_func)
+            >>> version = adapter.detect_version()
+            >>> print(version)
+            DockerComposeVersion.V2
         """
         # 如果强制指定版本，直接返回
         if self.forced_version != DockerComposeVersion.AUTO:
@@ -145,15 +225,37 @@ class DockerComposeAdapter:
         return False
 
     def build_command(self, command_type: str, **kwargs) -> ComposeCommand:
-        """
-        构建Docker Compose命令
+        """构建Docker Compose命令
+
+        根据检测到的版本构建相应格式的Docker Compose命令。
+        支持的命令类型包括: up, down, stop, logs, scale, ps, exec等。
 
         Args:
-            command_type: 命令类型 (up/down/stop/logs等)
-            **kwargs: 命令参数
+            command_type: 命令类型，如'up', 'down', 'stop', 'logs'等
+            **kwargs: 命令参数，常用参数包括:
+                - file: docker-compose文件路径
+                - services: 服务名列表或字符串
+                - lines: 日志行数(仅logs命令)
+                - service: 服务名(仅exec/scale命令)
+                - replicas: 副本数(仅scale命令)
+                - command: 执行的命令(仅exec命令)
 
         Returns:
-            封装的命令对象
+            封装的命令对象，包含完整命令字符串和版本信息
+
+        Raises:
+            ValueError: 当版本不支持或命令类型不支持时
+            KeyError: 当缺少必需参数时
+
+        Examples:
+            >>> adapter = DockerComposeAdapter("node1", ssh_func)
+            >>> cmd = adapter.build_command("up", file="app.yml", services=["web", "db"])
+            >>> print(cmd.full_cmd)
+            'docker compose -f app.yml up -d web db'
+            >>>
+            >>> log_cmd = adapter.build_command("logs", file="app.yml", services="web", lines=100)
+            >>> print(log_cmd.full_cmd)
+            'docker compose -f app.yml logs --tail 100 web'
         """
         version = self.detect_version()
 

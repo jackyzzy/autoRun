@@ -21,7 +21,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich import print as rprint
 
-from src.playbook.core import PlaybookCore
+from src.playbook.core import PlaybookCore, ExecutionResult
 
 
 # 全局变量
@@ -301,15 +301,15 @@ def run(ctx, scenario_name, all, dry_run):
                 progress.update(task, completed=100)
             
             # 显示结果
-            if results['status'] == 'completed':
-                summary = results['execution_summary']
+            if results.status == 'completed':
+                summary = results.data['execution_summary']
                 console.print(f"\n[green]✓ Test suite completed![/green]")
                 console.print(f"Success rate: {summary['success_rate']:.1f}%")
                 console.print(f"Total scenarios: {summary['total']}")
                 console.print(f"Completed: {summary['completed']}")
                 console.print(f"Failed: {summary['failed']}")
             else:
-                console.print(f"[red]✗ Test suite failed: {results.get('error', 'Unknown error')}[/red]")
+                console.print(f"[red]✗ Test suite failed: {results.error or 'Unknown error'}[/red]")
                 
         elif scenario_name:
             console.print(f"[bold green]Running scenario: {scenario_name}[/bold green]")
@@ -317,12 +317,12 @@ def run(ctx, scenario_name, all, dry_run):
             with console.status(f"[bold green]Executing {scenario_name}..."):
                 results = core.run_single_scenario(scenario_name)
             
-            if results['status'] == 'completed':
+            if results.status == 'completed':
                 console.print(f"[green]✓ Scenario {scenario_name} completed successfully![/green]")
-            elif results['status'] == 'skipped':
-                console.print(f"[yellow]⊘ Scenario {scenario_name} was skipped: {results.get('reason', 'Unknown')}[/yellow]")
+            elif results.status == 'skipped':
+                console.print(f"[yellow]⊘ Scenario {scenario_name} was skipped: {results.message or 'Unknown'}[/yellow]")
             else:
-                console.print(f"[red]✗ Scenario {scenario_name} failed: {results.get('error', 'Unknown error')}[/red]")
+                console.print(f"[red]✗ Scenario {scenario_name} failed: {results.error or 'Unknown error'}[/red]")
         else:
             console.print("[red]Please specify a scenario name or use --all flag[/red]")
             
