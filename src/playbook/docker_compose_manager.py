@@ -214,15 +214,29 @@ class DockerComposeManager:
                 )
 
                 full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
+                self.logger.info(f"Deploying {service.name} on {node_name} using {compose_cmd.version.value} with command: {compose_cmd.full_cmd}")
+
                 results = self.node_manager.execute_command(full_cmd, [node_name], timeout=timeout)
-                
+
                 node_result = results.get(node_name)
                 if node_result and node_result[0] == 0:
                     self.logger.info(f"Successfully deployed {service.name} on {node_name}")
                     return True
                 else:
-                    error_msg = node_result[2] if node_result else "Unknown error"
-                    self.logger.error(f"Failed to deploy {service.name} on {node_name}: {error_msg}")
+                    # 构建详细的错误信息
+                    exit_code = node_result[0] if node_result else "unknown"
+                    stdout_data = node_result[1] if node_result and len(node_result) > 1 else ""
+                    stderr_data = node_result[2] if node_result and len(node_result) > 2 else ""
+
+                    error_parts = [f"Failed to deploy {service.name} on {node_name} (exit code: {exit_code})"]
+
+                    if stderr_data.strip():
+                        error_parts.append(f"stderr: {stderr_data.strip()}")
+                    if stdout_data.strip():
+                        error_parts.append(f"stdout: {stdout_data.strip()}")
+
+                    error_msg = "; ".join(error_parts)
+                    self.logger.error(error_msg)
                     return False
                     
             finally:

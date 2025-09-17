@@ -111,11 +111,25 @@ class SSHClient:
             
             stdout_data = stdout.read().decode('utf-8', errors='ignore')
             stderr_data = stderr.read().decode('utf-8', errors='ignore')
-            
+
+            # 记录命令执行结果的详细信息
             self.logger.info(f"Command completed with exit code: {exit_code}")
-            
+
+            # 如果有输出内容，记录到日志中
+            if stdout_data.strip():
+                self.logger.info(f"Command stdout: {stdout_data.strip()}")
+            if stderr_data.strip():
+                self.logger.warning(f"Command stderr: {stderr_data.strip()}")
+
             if check_exit_code and exit_code != 0:
-                error_msg = f"Command failed with exit code {exit_code}: {stderr_data}"
+                # 构建更详细的错误信息
+                error_parts = [f"Command failed with exit code {exit_code}"]
+                if stderr_data.strip():
+                    error_parts.append(f"stderr: {stderr_data.strip()}")
+                if stdout_data.strip():
+                    error_parts.append(f"stdout: {stdout_data.strip()}")
+
+                error_msg = "; ".join(error_parts)
                 self.logger.error(error_msg)
                 raise SSHExecutionError(error_msg)
                 
