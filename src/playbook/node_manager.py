@@ -19,6 +19,7 @@
 """
 
 import logging
+import time
 from typing import Dict, List, Optional, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
@@ -293,15 +294,37 @@ class NodeManager:
         results = {}
         
         def upload_to_node(node_name: str) -> Tuple[str, bool]:
-            try:
-                node = self.nodes[node_name]
-                client = node.get_ssh_client()
-                with client.connection_context():
-                    success = client.upload_file(local_path, remote_path)
-                    return node_name, success
-            except Exception as e:
-                self.logger.error(f"File upload failed to {node_name}: {e}")
-                return node_name, False
+            max_retries = 2
+            retry_delay = 1
+
+            for attempt in range(max_retries + 1):
+                try:
+                    node = self.nodes[node_name]
+                    client = node.get_ssh_client()
+
+                    if attempt > 0:
+                        self.logger.info(f"Retrying file upload to {node_name} (attempt {attempt + 1})")
+                        time.sleep(retry_delay)
+
+                    with client.connection_context():
+                        success = client.upload_file(local_path, remote_path)
+                        if success:
+                            if attempt > 0:
+                                self.logger.info(f"File upload succeeded to {node_name} after {attempt + 1} attempts")
+                            return node_name, True
+                        else:
+                            if attempt < max_retries:
+                                self.logger.warning(f"File upload failed to {node_name}, will retry")
+                            continue
+
+                except Exception as e:
+                    error_msg = str(e)
+                    if attempt < max_retries:
+                        self.logger.warning(f"File upload failed to {node_name} (attempt {attempt + 1}): {error_msg}, will retry")
+                    else:
+                        self.logger.error(f"File upload failed to {node_name} after {max_retries + 1} attempts: {error_msg}")
+
+            return node_name, False
         
         # 并发上传
         with ThreadPoolExecutor(max_workers=min(len(node_names), 5)) as executor:

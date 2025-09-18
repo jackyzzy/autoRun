@@ -168,7 +168,7 @@ class DockerComposeManager:
         return results
     
     def deploy_service(self, scenario_path: Path, service: ServiceDeployment,
-                      node_name: str, timeout: int = 300) -> bool:
+                      node_name: str, timeout: int = 300, is_retry: bool = False) -> bool:
         """在指定节点上部署服务"""
         try:
             compose_file_path = scenario_path / service.compose_file
@@ -185,69 +185,133 @@ class DockerComposeManager:
                 self.logger.error(f"Node {node_name} not found")
                 return False
             
-            # 创建临时的过滤版本compose文件
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False) as f:
-                temp_compose_path = f.name
-            
-            try:
-                # 创建只包含目标服务的compose文件
-                if not compose_file.create_filtered_compose([service.name], temp_compose_path):
-                    self.logger.error(f"Failed to create filtered compose for {service.name}")
-                    return False
-                
-                # 上传compose文件到节点
-                remote_compose_path = f"{node.docker_compose_path}/{service.compose_file}"
-                upload_success = self.node_manager.upload_file(
-                    temp_compose_path, remote_compose_path, [node_name]
-                )
-                
-                if not upload_success.get(node_name, False):
-                    self.logger.error(f"Failed to upload compose file to {node_name}")
-                    return False
-                
-                # 在节点上启动服务 - 使用适配器构建命令
-                compose_cmd = self.node_manager.build_compose_command(
-                    node_name=node_name,
-                    command_type="up",
-                    file=service.compose_file,
-                    services=[service.name]
-                )
+            # 直接上传完整的compose文件
+            remote_compose_path = f"{node.docker_compose_path}/{service.compose_file}"
+            # 如果是重试，可以跳过相同文件的上传；首次部署总是强制上传
+            force_upload = not is_retry
+            upload_success = self._upload_compose_file_with_retry(
+                str(compose_file_path), remote_compose_path, node_name, retries=2, force_upload=force_upload
+            )
 
-                full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
-                self.logger.info(f"Deploying {service.name} on {node_name} using {compose_cmd.version.value} with command: {compose_cmd.full_cmd}")
+            if not upload_success:
+                self.logger.error(f"Failed to upload compose file to {node_name}")
+                return False
 
-                results = self.node_manager.execute_command(full_cmd, [node_name], timeout=timeout)
+            # 在节点上启动服务 - 使用适配器构建命令
+            compose_cmd = self.node_manager.build_compose_command(
+                node_name=node_name,
+                command_type="up",
+                file=service.compose_file,
+                services=[service.name]
+            )
 
-                node_result = results.get(node_name)
-                if node_result and node_result[0] == 0:
-                    self.logger.info(f"Successfully deployed {service.name} on {node_name}")
-                    return True
-                else:
-                    # 构建详细的错误信息
-                    exit_code = node_result[0] if node_result else "unknown"
-                    stdout_data = node_result[1] if node_result and len(node_result) > 1 else ""
-                    stderr_data = node_result[2] if node_result and len(node_result) > 2 else ""
+            full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
+            self.logger.info(f"Deploying {service.name} on {node_name} using {compose_cmd.version.value} with command: {compose_cmd.full_cmd}")
 
-                    error_parts = [f"Failed to deploy {service.name} on {node_name} (exit code: {exit_code})"]
+            results = self.node_manager.execute_command(full_cmd, [node_name], timeout=timeout)
 
-                    if stderr_data.strip():
-                        error_parts.append(f"stderr: {stderr_data.strip()}")
-                    if stdout_data.strip():
-                        error_parts.append(f"stdout: {stdout_data.strip()}")
+            node_result = results.get(node_name)
+            if node_result and node_result[0] == 0:
+                self.logger.info(f"Successfully deployed {service.name} on {node_name}")
+                return True
+            else:
+                # 构建详细的错误信息
+                exit_code = node_result[0] if node_result else "unknown"
+                stdout_data = node_result[1] if node_result and len(node_result) > 1 else ""
+                stderr_data = node_result[2] if node_result and len(node_result) > 2 else ""
 
-                    error_msg = "; ".join(error_parts)
-                    self.logger.error(error_msg)
-                    return False
-                    
-            finally:
-                # 清理临时文件
-                if os.path.exists(temp_compose_path):
-                    os.unlink(temp_compose_path)
+                error_parts = [f"Failed to deploy {service.name} on {node_name} (exit code: {exit_code})"]
+
+                if stderr_data.strip():
+                    error_parts.append(f"stderr: {stderr_data.strip()}")
+                if stdout_data.strip():
+                    error_parts.append(f"stdout: {stdout_data.strip()}")
+
+                error_msg = "; ".join(error_parts)
+                self.logger.error(error_msg)
+                return False
                 
         except Exception as e:
             self.logger.error(f"Error deploying service {service.name} on {node_name}: {e}")
             return False
-    
+
+    def _upload_compose_file_with_retry(self, local_path: str, remote_path: str, node_name: str, retries: int = 2, force_upload: bool = True) -> bool:
+        """🔒 带重试和并发保护的compose文件上传"""
+        import time
+        import os
+        import hashlib
+
+        # 计算本地文件的哈希值，用于验证
+        try:
+            with open(local_path, 'rb') as f:
+                local_hash = hashlib.md5(f.read()).hexdigest()
+            local_size = os.path.getsize(local_path)
+        except Exception as e:
+            self.logger.error(f"Failed to read local file {local_path}: {e}")
+            return False
+
+        # 只在非强制上传时检查远程文件是否已存在且相同
+        if not force_upload:
+            try:
+                check_cmd = f"test -f {remote_path} && md5sum {remote_path} | cut -d' ' -f1"
+                result = self.node_manager.execute_command(check_cmd, [node_name], timeout=10)
+                node_result = result.get(node_name)
+
+                if node_result and node_result[0] == 0:
+                    remote_hash = node_result[1].strip()
+                    if remote_hash == local_hash:
+                        self.logger.debug(f"Compose file already exists and matches on {node_name}, skipping upload")
+                        return True
+                    else:
+                        self.logger.debug(f"Compose file exists but differs on {node_name}, will overwrite")
+            except Exception as e:
+                self.logger.debug(f"Could not check existing file: {e}")
+        else:
+            self.logger.debug(f"Force upload enabled, will overwrite any existing file")
+
+        # 文件不存在或不同，需要上传
+        for attempt in range(retries + 1):
+            try:
+                upload_result = self.node_manager.upload_file(local_path, remote_path, [node_name])
+                success = upload_result.get(node_name, False)
+
+                if success:
+                    # 验证上传后的文件
+                    verify_cmd = f"md5sum {remote_path} | cut -d' ' -f1"
+                    verify_result = self.node_manager.execute_command(verify_cmd, [node_name], timeout=10)
+                    node_verify = verify_result.get(node_name)
+
+                    if node_verify and node_verify[0] == 0:
+                        uploaded_hash = node_verify[1].strip()
+                        if uploaded_hash == local_hash:
+                            if attempt > 0:
+                                self.logger.info(f"File upload succeeded on attempt {attempt + 1}")
+                            return True
+                        else:
+                            self.logger.warning(f"Upload verification failed: hash mismatch")
+                            success = False
+
+                if not success:
+                    if attempt < retries:
+                        self.logger.warning(f"File upload failed (attempt {attempt + 1}/{retries + 1}), retrying in 1 second...")
+                        time.sleep(1)
+                    else:
+                        self.logger.error(f"File upload failed after {retries + 1} attempts")
+
+            except Exception as e:
+                # 检查是否是解释器关闭导致的错误，如果是则快速失败
+                if "interpreter shutdown" in str(e).lower():
+                    self.logger.warning(f"Interpreter shutting down, aborting file upload")
+                    return False
+
+                if attempt < retries:
+                    self.logger.warning(f"File upload error (attempt {attempt + 1}/{retries + 1}): {e}, retrying...")
+                    time.sleep(1)
+                else:
+                    self.logger.error(f"File upload error after {retries + 1} attempts: {e}")
+
+        return False
+
     def stop_service(self, scenario_path: Path, service: ServiceDeployment,
                     node_name: str, timeout: int = 120) -> bool:
         """在指定节点上停止服务"""

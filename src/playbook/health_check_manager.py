@@ -376,7 +376,7 @@ class HealthCheckManager:
         
         return summary
     
-    def run_batch_health_checks(self, services: List[ServiceDeployment], parallel: bool = True) -> Dict[str, Dict[str, List[HealthCheckResult]]]:
+    def run_batch_health_checks(self, services: List[ServiceDeployment], parallel: bool = True, max_workers: int = 4) -> Dict[str, Dict[str, List[HealthCheckResult]]]:
         """批量运行多个服务的健康检查"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
@@ -384,7 +384,7 @@ class HealthCheckManager:
         
         if parallel and len(services) > 1:
             # 并行执行健康检查
-            with ThreadPoolExecutor(max_workers=min(len(services), 4)) as executor:
+            with ThreadPoolExecutor(max_workers=min(len(services), max_workers)) as executor:
                 future_to_service = {
                     executor.submit(self.run_service_health_check, service): service.name 
                     for service in services

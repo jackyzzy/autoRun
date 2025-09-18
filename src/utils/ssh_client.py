@@ -184,8 +184,49 @@ class SSHClient:
             if remote_dir:
                 self.execute_command(f"mkdir -p {remote_dir}", check_exit_code=False)
             
+            # 上传文件
             self.sftp.put(local_path, remote_path)
-            self.logger.info(f"Uploaded {local_path} to {remote_path}")
+
+            # 验证上传结果
+            try:
+                local_size = os.path.getsize(local_path)
+                remote_stat = self.sftp.stat(remote_path)
+                remote_size = remote_stat.st_size
+
+                if local_size != remote_size:
+                    self.logger.error(f"File size mismatch after upload: local={local_size}, remote={remote_size}")
+
+                    # 清理上传失败的文件
+                    try:
+                        self.sftp.remove(remote_path)
+                        self.logger.info(f"Cleaned up corrupted remote file: {remote_path}")
+                    except Exception as cleanup_error:
+                        self.logger.warning(f"Failed to cleanup corrupted remote file {remote_path}: {cleanup_error}")
+
+                    raise SSHExecutionError(f"File upload verification failed: size mismatch (local={local_size}, remote={remote_size})")
+
+                self.logger.info(f"Uploaded {local_path} to {remote_path} (size: {local_size} bytes)")
+            except SSHExecutionError:
+                # 重新抛出验证错误
+                raise
+            except Exception as e:
+                self.logger.warning(f"Could not verify upload size: {e}")
+                # 如果无法验证，尝试读取远程文件的一小部分来确认上传成功
+                try:
+                    with self.sftp.open(remote_path, 'r') as remote_file:
+                        # 尝试读取前几个字节
+                        remote_file.read(100)
+                    self.logger.info(f"Upload verification: file {remote_path} appears readable")
+                except Exception as read_error:
+                    self.logger.error(f"Upload verification failed: cannot read remote file {remote_path}: {read_error}")
+                    # 清理可能损坏的文件
+                    try:
+                        self.sftp.remove(remote_path)
+                        self.logger.info(f"Cleaned up unreadable remote file: {remote_path}")
+                    except:
+                        pass
+                    raise SSHExecutionError(f"File upload failed: remote file is not readable: {read_error}")
+
             return True
             
         except Exception as e:

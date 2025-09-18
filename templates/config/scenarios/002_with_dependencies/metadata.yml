@@ -1,0 +1,183 @@
+# 🎯 复杂依赖关系场景示例
+# 本示例演示如何配置具有复杂依赖关系的多服务场景
+
+name: "complex_dependency_test"
+description: "演示复杂服务依赖关系和并发部署的示例场景"
+version: "1.0"
+tags: ["example", "dependency", "concurrent"]
+estimated_duration: 2400  # 40分钟
+dependencies: []
+resource_requirements:
+  min_gpu_memory: "16GB"
+  min_nodes: 2
+  min_memory_gb: 64
+author: "Playbook Team"
+created: "2025-09-18"
+
+# 🚀 分布式部署配置 - 展示依赖关系和批次部署
+deployment:
+  services:
+    # 📊 Batch 1: 基础服务层（无依赖，可并发部署）
+    - name: "redis"
+      compose_file: "docker-compose.yml"
+      nodes: ["node1"]
+      depends_on: []  # 无依赖 → Batch 1
+      health_check:
+        enabled: true
+        strategy: "basic"
+        startup_timeout: 120
+        startup_grace_period: 30
+        check_interval: 10
+        max_retries: 5
+        checks:
+          - type: "docker_status"
+            required: true
+          - type: "http_endpoint"
+            required: true
+            url: "http://localhost:6379/ping"
+            method: "GET"
+            expected_status: 200
+            timeout: 5
+
+    - name: "mysql"
+      compose_file: "docker-compose.yml"
+      nodes: ["node2"]
+      depends_on: []  # 无依赖 → Batch 1
+      health_check:
+        enabled: true
+        strategy: "basic"
+        startup_timeout: 180
+        startup_grace_period: 60
+        check_interval: 15
+        max_retries: 8
+        checks:
+          - type: "docker_status"
+            required: true
+
+    - name: "config-service"
+      compose_file: "docker-compose.yml"
+      nodes: ["node1"]
+      depends_on: []  # 无依赖 → Batch 1
+      health_check:
+        enabled: true
+        strategy: "basic"
+        startup_timeout: 90
+        startup_grace_period: 20
+        check_interval: 10
+        max_retries: 3
+
+    # 📊 Batch 2: 应用服务层（依赖基础服务）
+    - name: "user-service"
+      compose_file: "docker-compose.yml"
+      nodes: ["node1", "node2"]
+      depends_on: ["redis", "mysql"]  # 依赖Batch 1的服务 → Batch 2
+      health_check:
+        enabled: true
+        strategy: "comprehensive"
+        startup_timeout: 300
+        startup_grace_period: 90
+        check_interval: 20
+        max_retries: 5
+        checks:
+          - type: "docker_status"
+            required: true
+          - type: "http_endpoint"
+            required: true
+            url: "http://localhost:8001/health"
+            method: "GET"
+            expected_status: 200
+            timeout: 10
+
+    - name: "order-service"
+      compose_file: "docker-compose.yml"
+      nodes: ["node1", "node2"]
+      depends_on: ["redis", "mysql"]  # 依赖Batch 1的服务 → Batch 2
+      health_check:
+        enabled: true
+        strategy: "comprehensive"
+        startup_timeout: 300
+        startup_grace_period: 90
+        check_interval: 20
+        max_retries: 5
+
+    # 📊 Batch 3: 网关层（依赖应用服务）
+    - name: "api-gateway"
+      compose_file: "docker-compose.yml"
+      nodes: ["node1"]
+      depends_on: ["user-service", "order-service", "config-service"]  # 依赖Batch 1和2 → Batch 3
+      health_check:
+        enabled: true
+        strategy: "comprehensive"
+        startup_timeout: 240
+        startup_grace_period: 60
+        check_interval: 15
+        max_retries: 8
+        checks:
+          - type: "docker_status"
+            required: true
+          - type: "http_endpoint"
+            required: true
+            url: "http://localhost:8080/api/health"
+            method: "GET"
+            expected_status: 200
+            timeout: 10
+
+    # 📊 Batch 4: 前端层（依赖网关）
+    - name: "web-frontend"
+      compose_file: "docker-compose.yml"
+      nodes: ["node2"]
+      depends_on: ["api-gateway"]  # 依赖Batch 3 → Batch 4
+      health_check:
+        enabled: true
+        strategy: "basic"
+        startup_timeout: 120
+        startup_grace_period: 30
+        check_interval: 10
+        max_retries: 3
+
+    - name: "mobile-app-backend"
+      compose_file: "docker-compose.yml"
+      nodes: ["node1"]
+      depends_on: ["api-gateway"]  # 依赖Batch 3 → Batch 4
+      health_check:
+        enabled: true
+        strategy: "basic"
+        startup_timeout: 120
+        startup_grace_period: 30
+        check_interval: 10
+        max_retries: 3
+
+# 📊 预期的并发部署批次分析：
+#
+# Batch 1 (并发3个服务): [redis, mysql, config-service]
+# ├─ 无依赖，可同时启动
+# ├─ 部署时间：约max(120s, 180s, 90s) = 180s
+# └─ 并发度：3/5 (在max_concurrent_services=5的限制下)
+#
+# Batch 2 (并发2个服务): [user-service, order-service]
+# ├─ 等待Batch 1完成后开始
+# ├─ 部署时间：约max(300s, 300s) = 300s
+# └─ 并发度：2/5
+#
+# Batch 3 (1个服务): [api-gateway]
+# ├─ 等待Batch 2完成后开始
+# ├─ 部署时间：约240s
+# └─ 并发度：1/5
+#
+# Batch 4 (并发2个服务): [web-frontend, mobile-app-backend]
+# ├─ 等待Batch 3完成后开始
+# ├─ 部署时间：约max(120s, 120s) = 120s
+# └─ 并发度：2/5
+#
+# 🎯 总部署时间：180s + 300s + 240s + 120s = 840s (14分钟)
+# 📈 对比串行部署：180+300+240+120+120+90+180 = 1230s (20.5分钟)
+# 🚀 性能提升：约32% (节省6.5分钟)
+
+  test_execution:
+    node: "local"
+    script: "run_complex_test.sh"
+    timeout: 2400
+    result_paths:
+      - "/tmp/complex_test_results"
+      - "/var/log/integration_test"
+    wait_for_all_services: true

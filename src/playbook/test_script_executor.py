@@ -176,14 +176,29 @@ class TestScriptExecutor:
         try:
             # 上传测试脚本到远程节点
             remote_script_path = f"{node.work_dir}/test_script_{scenario.name}.sh"
+
+            # 记录原始脚本信息用于验证
+            original_size = script_path.stat().st_size
+            self.logger.info(f"Uploading test script: {script_path} (size: {original_size} bytes) to {remote_script_path}")
+
             upload_success = self.node_manager.upload_file(
                 str(script_path), remote_script_path, [node_name]
             )
-            
+
             if not upload_success.get(node_name, False):
                 return TestExecutionResult(
                     success=False,
                     error_message=f"Failed to upload script to {node_name}",
+                    duration=time.time() - start_time
+                )
+
+            # 验证上传的脚本文件
+            self.logger.info(f"Verifying uploaded script on {node_name}")
+            verify_result = self._verify_remote_script(node_name, remote_script_path, original_size)
+            if not verify_result["success"]:
+                return TestExecutionResult(
+                    success=False,
+                    error_message=f"Script verification failed on {node_name}: {verify_result['error']}",
                     duration=time.time() - start_time
                 )
             
@@ -357,5 +372,56 @@ class TestScriptExecutor:
             
         except Exception as e:
             self.logger.debug(f"Failed to parse metrics: {e}")
-        
+
         return metrics
+
+    def _verify_remote_script(self, node_name: str, remote_script_path: str, expected_size: int) -> dict:
+        """验证远程脚本文件的完整性"""
+        try:
+            # 检查文件是否存在且获取大小
+            check_cmd = f"test -f {remote_script_path} && stat -f%z {remote_script_path} 2>/dev/null || stat -c%s {remote_script_path} 2>/dev/null"
+            results = self.node_manager.execute_command(check_cmd, [node_name], timeout=10)
+
+            node_result = results.get(node_name)
+            if not node_result:
+                return {"success": False, "error": "No response from node"}
+
+            exit_code, stdout, stderr = node_result
+            if exit_code != 0:
+                return {"success": False, "error": f"File check failed: {stderr.strip()}"}
+
+            try:
+                remote_size = int(stdout.strip())
+            except ValueError:
+                return {"success": False, "error": f"Invalid file size response: {stdout.strip()}"}
+
+            # 验证文件大小
+            if remote_size != expected_size:
+                return {
+                    "success": False,
+                    "error": f"File size mismatch: expected {expected_size}, got {remote_size}"
+                }
+
+            # 验证文件不为空且有基本的脚本内容
+            if remote_size == 0:
+                return {"success": False, "error": "Script file is empty"}
+
+            # 检查文件头是否为脚本
+            head_cmd = f"head -1 {remote_script_path}"
+            head_results = self.node_manager.execute_command(head_cmd, [node_name], timeout=5)
+            head_result = head_results.get(node_name)
+
+            if head_result:
+                head_exit_code, head_stdout, head_stderr = head_result
+                if head_exit_code == 0:
+                    first_line = head_stdout.strip()
+                    if first_line.startswith("#!/") or len(first_line) > 0:
+                        self.logger.info(f"Script verification passed: {remote_script_path} (size: {remote_size}, first line: {first_line[:50]}...)")
+                        return {"success": True, "size": remote_size, "first_line": first_line}
+                    else:
+                        return {"success": False, "error": "Script file appears to be empty or corrupted"}
+
+            return {"success": True, "size": remote_size}
+
+        except Exception as e:
+            return {"success": False, "error": f"Verification failed: {str(e)}"}

@@ -258,6 +258,7 @@ class ScenarioManager:
         self.execution_mode = ScenarioDiscoveryMode.AUTO
         self.filters = {}
         self.inter_scenario_config = {}
+        self.execution_config = {}  # 新增：并发执行配置
         
         if config_file and Path(config_file).exists():
             self.load_config()
@@ -279,8 +280,13 @@ class ScenarioManager:
             
             # 加载场景间配置
             self.inter_scenario_config = self.config.get('inter_scenario', {})
-            
+
+            # 加载并发执行配置
+            self.execution_config = self.config.get('execution_config', {})
+
             self.logger.info(f"Loaded scenario configuration from {self.config_file}")
+            if self.execution_config:
+                self.logger.info(f"Concurrent execution config: {self.execution_config}")
             
         except Exception as e:
             self.logger.error(f"Failed to load scenario config: {e}")

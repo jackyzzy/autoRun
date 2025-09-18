@@ -6,6 +6,7 @@
 import os
 import time
 import logging
+import asyncio
 from typing import Dict, List, Optional, Any, Callable
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -18,6 +19,9 @@ from .docker_compose_manager import DockerComposeManager
 from .dependency_resolver import ServiceDependencyResolver
 from .health_check_manager import HealthCheckManager
 from .test_script_executor import TestScriptExecutor
+from .concurrent_deployer import (
+    ConcurrentServiceDeployer, ConcurrentDeploymentLogger, ConcurrentRetryStrategy
+)
 from ..utils.logger import setup_scenario_logger, LogCapture
 
 
@@ -112,6 +116,11 @@ class ScenarioRunner:
         self.dependency_resolver = ServiceDependencyResolver(self.docker_manager)
         self.health_checker = HealthCheckManager(node_manager)
         self.test_executor = TestScriptExecutor(node_manager)
+
+        # 并发部署组件
+        self.concurrent_deployer = ConcurrentServiceDeployer(
+            self.docker_manager, self.dependency_resolver
+        )
         
         # 执行状态
         self.is_running = False
@@ -573,56 +582,131 @@ class ScenarioRunner:
             logger.info(f"Batch {i}: {service_names}")
     
     def _deploy_services_with_dependencies(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """按依赖顺序部署服务"""
+        """按依赖顺序并发部署服务"""
         scenario_path = Path(scenario.directory)
+
+        # 获取并发配置
+        execution_config = getattr(self.scenario_manager, 'execution_config', {})
+        concurrent_config = execution_config.get('concurrent_deployment', {})
+        max_concurrent_services = concurrent_config.get('max_concurrent_services', 5)
+
+        # 配置重试策略
+        retry_config = execution_config.get('retry_strategy', {})
+        retry_strategy = ConcurrentRetryStrategy(
+            max_retries=retry_config.get('service_level_retries', 2),
+            retry_delay=retry_config.get('retry_delay', 30),
+            retry_only_failed=retry_config.get('retry_only_failed', True)
+        )
+
+        # 获取超时配置
+        deployment_timeout = concurrent_config.get('deployment_timeout', 600)
+        health_check_timeout = concurrent_config.get('health_check_timeout', 300)
+
+        # 获取部署批次
         batches = self.dependency_resolver.get_deployment_batches()
-        
-        logger.info(f"Deploying {len(batches)} batches of services")
-        
+
+        # 创建并发部署日志器
+        deployment_logger = ConcurrentDeploymentLogger(logger)
+
+        # 检查是否启用并发部署
+        if max_concurrent_services <= 1:
+            logger.info("Concurrent deployment disabled, using legacy serial deployment")
+            self._deploy_services_legacy(scenario, result, logger, batches, scenario_path)
+            return
+
+        logger.info(f"Using concurrent deployment with max_concurrent_services={max_concurrent_services}")
+
+        # 使用并发部署器
+        try:
+            deployment_results = asyncio.run(
+                self.concurrent_deployer.deploy_services_concurrent(
+                    batches, scenario_path, deployment_logger,
+                    max_concurrent_services, retry_strategy, deployment_timeout
+                )
+            )
+
+            # 转换结果格式以保持兼容性
+            legacy_results = {
+                name: result.is_success
+                for name, result in deployment_results.items()
+            }
+
+            # 记录部署结果到result.metrics
+            result.metrics['service_deployment'] = legacy_results
+            result.metrics['deployment_summary'] = self.dependency_resolver.get_deployment_summary()
+            result.metrics['concurrent_deployment_details'] = {
+                name: {
+                    'status': result.status.value,
+                    'duration': result.duration,
+                    'retry_count': result.retry_count,
+                    'nodes_deployed': result.nodes_deployed,
+                    'error_message': result.error_message
+                }
+                for name, result in deployment_results.items()
+            }
+
+        except RuntimeError as e:
+            # 并发部署失败时的错误处理
+            logger.error(f"Concurrent deployment failed: {e}")
+            raise
+
+    def _deploy_services_legacy(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger,
+                               batches, scenario_path):
+        """传统串行部署（作为fallback）"""
         deployment_results = {}
-        
+
         for i, batch in enumerate(batches, 1):
             logger.info(f"Deploying batch {i}/{len(batches)}")
-            
+
             batch_results = self.dependency_resolver.deploy_batch(batch, scenario_path)
             deployment_results.update(batch_results)
-            
+
             # 检查批次是否有失败
             failed_services = [name for name, success in batch_results.items() if not success]
             if failed_services:
                 logger.error(f"Batch {i} deployment failed for services: {failed_services}")
                 raise RuntimeError(f"Service deployment failed: {failed_services}")
-            
+
             logger.info(f"Batch {i} deployed successfully")
-        
+
         # 记录部署结果到result.metrics
         result.metrics['service_deployment'] = deployment_results
         result.metrics['deployment_summary'] = self.dependency_resolver.get_deployment_summary()
     
     def _run_comprehensive_health_checks(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """运行全面健康检查"""
+        """运行全面健康检查（支持并发）"""
         services = scenario.metadata.deployment.services
-        
-        logger.info(f"Running health checks for {len(services)} services")
-        
-        # 运行健康检查
-        health_results = self.health_checker.run_batch_health_checks(services, parallel=True)
-        
+
+        # 获取并发配置
+        execution_config = getattr(self.scenario_manager, 'execution_config', {})
+        concurrent_config = execution_config.get('concurrent_deployment', {})
+        max_concurrent_health_checks = concurrent_config.get('max_concurrent_health_checks', 10)
+        health_check_timeout = concurrent_config.get('health_check_timeout', 300)
+
+        logger.info(f"Running health checks for {len(services)} services (max_concurrent={max_concurrent_health_checks}, timeout={health_check_timeout}s)")
+
+        # 运行并发健康检查
+        health_results = self.health_checker.run_batch_health_checks(
+            services,
+            parallel=True,
+            max_workers=max_concurrent_health_checks
+        )
+
         # 聚合结果
         health_summary = self.health_checker.aggregate_health_results(health_results)
-        
+
         # 记录到结果中
         result.metrics['health_checks'] = health_summary
-        
+
         if not health_summary['overall_healthy']:
             failed_checks = health_summary.get('failed_checks', [])
             logger.error(f"Health checks failed: {len(failed_checks)} failures")
-            
+
             for failed_check in failed_checks[:5]:  # 显示前5个失败
                 logger.error(f"  - {failed_check['service']}@{failed_check['node']}: {failed_check['message']}")
-            
+
             raise RuntimeError(f"Health checks failed for {health_summary['unhealthy_services']} services")
-        
+
         logger.info(f"All health checks passed: {health_summary['healthy_services']}/{health_summary['total_services']} services healthy")
     
     def _execute_test_scripts(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
@@ -707,21 +791,81 @@ class ScenarioRunner:
         logger.info(f"Collected results from {len(collected_files)} additional sources")
     
     def _stop_distributed_services(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """停止分布式服务"""
+        """停止分布式服务（支持并发）"""
         scenario_path = Path(scenario.directory)
         services = scenario.metadata.deployment.services
-        
-        logger.info(f"Stopping {len(services)} distributed services")
-        
+
+        # 获取并发配置
+        execution_config = getattr(self.scenario_manager, 'execution_config', {})
+        concurrent_config = execution_config.get('concurrent_deployment', {})
+        max_concurrent_services = concurrent_config.get('max_concurrent_services', 5)
+        deployment_timeout = concurrent_config.get('deployment_timeout', 600)
+
+        logger.info(f"Stopping {len(services)} distributed services (max_concurrent={max_concurrent_services})")
+
         # 按反向依赖顺序停止服务（先停止依赖方）
-        batches = self.dependency_resolver.get_deployment_batches()
-        
-        for i, batch in enumerate(reversed(batches), 1):
+        batches = list(reversed(self.dependency_resolver.get_deployment_batches()))
+
+        # 检查是否启用并发停止
+        if max_concurrent_services <= 1:
+            logger.info("Concurrent stop disabled, using serial stop")
+            self._stop_services_legacy(scenario, result, logger, batches, scenario_path)
+            return
+
+        # 使用并发停止
+        try:
+            asyncio.run(self._stop_services_concurrent(batches, scenario_path, max_concurrent_services, deployment_timeout, logger))
+        except asyncio.TimeoutError:
+            logger.error(f"Concurrent service stop timeout after {deployment_timeout}s")
+            # 继续执行，不抛出异常以免影响清理
+        except Exception as e:
+            logger.error(f"Error during concurrent service stop: {e}")
+            import traceback
+            logger.debug(f"Full traceback: {traceback.format_exc()}")
+            # 继续执行，不抛出异常以免影响清理
+
+        logger.info("Distributed services stop completed")
+
+    async def _stop_services_concurrent(self, batches, scenario_path, max_concurrent, deployment_timeout, logger):
+        """并发停止服务批次"""
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        for i, batch in enumerate(batches, 1):
             logger.info(f"Stopping batch {i}/{len(batches)}")
-            
+
+            async def stop_single_service(service_node):
+                async with semaphore:
+                    service = service_node.service
+                    loop = asyncio.get_event_loop()
+
+                    for node_name in service.nodes:
+                        try:
+                            success = await loop.run_in_executor(
+                                None, self.docker_manager.stop_service,
+                                scenario_path, service, node_name, deployment_timeout
+                            )
+                            if success:
+                                logger.info(f"Stopped {service.name} on {node_name}")
+                            else:
+                                logger.warning(f"Failed to stop {service.name} on {node_name}")
+                        except Exception as e:
+                            logger.warning(f"Error stopping {service.name} on {node_name}: {e}")
+
+            # 批次内并发停止
+            tasks = [stop_single_service(service_node) for service_node in batch]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            logger.info(f"Batch {i} stop completed")
+
+    def _stop_services_legacy(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger,
+                             batches, scenario_path):
+        """传统串行停止（作为fallback）"""
+        for i, batch in enumerate(batches, 1):
+            logger.info(f"Stopping batch {i}/{len(batches)}")
+
             for service_node in batch:
                 service = service_node.service
-                
+
                 for node_name in service.nodes:
                     try:
                         success = self.docker_manager.stop_service(
@@ -733,8 +877,6 @@ class ScenarioRunner:
                             logger.warning(f"Failed to stop {service.name} on {node_name}")
                     except Exception as e:
                         logger.warning(f"Error stopping {service.name} on {node_name}: {e}")
-        
-        logger.info("Distributed services stop completed")
     
     def _cleanup_distributed_environment(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """清理分布式环境"""

@@ -5,10 +5,12 @@
 
 import logging
 import time
+import asyncio
 from typing import Dict, List, Optional, Set, Tuple
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from .scenario_manager import ServiceDeployment
 from .docker_compose_manager import DockerComposeManager
@@ -105,7 +107,29 @@ class ServiceDependencyResolver:
         return False
     
     def get_deployment_batches(self) -> List[List[ServiceNode]]:
-        """计算服务部署批次，使用拓扑排序"""
+        """计算服务部署批次，使用拓扑排序
+
+        🎯 核心算法：基于Kahn算法的拓扑排序
+        📊 工作原理：
+            1. 计算每个服务的入度（依赖数量）
+            2. 找到所有入度为0的服务作为当前批次
+            3. 部署当前批次后，更新依赖这些服务的其他服务的入度
+            4. 重复直到所有服务都被分配到批次中
+
+        🚀 并发优势：
+            - 同批次内的服务可以并发部署
+            - 最大化部署并发度，最小化总部署时间
+            - 保证依赖关系绝对不被违反
+
+        📈 性能示例：
+            无依赖场景: [S1,S2,S3] → 1个批次 → 并发部署
+            链式依赖: S1→S2→S3 → 3个批次 → 串行部署
+            分层依赖: [S1,S2]→[S3,S4] → 2个批次 → 部分并发
+
+        Returns:
+            List[List[ServiceNode]]: 按依赖顺序排列的服务批次列表
+                                   每个批次内的服务可以并发部署
+        """
         if not self.service_nodes:
             return []
         
@@ -118,19 +142,21 @@ class ServiceDependencyResolver:
         batches = []
         
         while queue:
-            # 当前批次：所有入度为0的节点可以并行部署
+            # 🔄 核心循环：处理当前入度为0的所有服务
             current_batch = []
-            batch_size = len(queue)
-            
+            batch_size = len(queue)  # 🔒 锁定当前批次大小，避免在循环中添加的服务影响当前批次
+
+            # 📦 构建当前批次：所有入度为0的服务可以并发部署
             for _ in range(batch_size):
                 service_name = queue.popleft()
                 current_batch.append(self.service_nodes[service_name])
-                
-                # 更新依赖此服务的其他服务的入度
+
+                # 🔄 依赖解析：当前服务部署完成后，更新依赖它的服务的入度
                 for dependent_name in self.service_nodes[service_name].dependents:
                     in_degree[dependent_name] -= 1
+                    # 📍 新的可部署服务：入度降为0表示所有依赖都已就绪
                     if in_degree[dependent_name] == 0:
-                        queue.append(dependent_name)
+                        queue.append(dependent_name)  # 🔮 加入下一批次
             
             if current_batch:
                 batches.append(current_batch)
@@ -150,28 +176,118 @@ class ServiceDependencyResolver:
     
     def wait_for_service_ready(self, service_name: str, node_names: List[str],
                               timeout: int = 300) -> bool:
-        """等待服务在指定节点上就绪"""
+        """🏥 等待服务在指定节点上就绪 - 智能健康检查
+
+        🎯 改进机制：
+        1. 动态调整检查间隔
+        2. 提前检测失败状态
+        3. 详细的状态日志
+        4. 智能退出条件
+
+        Args:
+            service_name: 服务名称
+            node_names: 节点名称列表
+            timeout: 超时时间（秒）
+
+        Returns:
+            bool: 是否所有节点上的服务都就绪
+        """
         start_time = time.time()
-        check_interval = 10
-        
+        check_interval = 5  # 🔧 减少初始检查间隔，更快发现问题
+        max_check_interval = 30  # 最大检查间隔
+        consecutive_failures = 0
+        max_consecutive_failures = 3  # 连续失败次数阈值
+
+        self.logger.info(f"Waiting for service {service_name} to be ready on {len(node_names)} nodes")
+
         while time.time() - start_time < timeout:
             all_ready = True
-            
+            ready_nodes = []
+            failed_nodes = []
+
             for node_name in node_names:
-                status = self.docker_manager.get_service_status(service_name, node_name)
-                
-                if not status.get('running', False):
+                try:
+                    status = self.docker_manager.get_service_status(service_name, node_name)
+
+                    if status.get('running', False):
+                        ready_nodes.append(node_name)
+                    else:
+                        all_ready = False
+                        failed_nodes.append(node_name)
+
+                        # 🚨 检查是否是永久性失败
+                        error_msg = status.get('error', '')
+                        if self._is_permanent_failure(error_msg):
+                            self.logger.error(f"Service {service_name} on {node_name} has permanent failure: {error_msg}")
+                            return False
+
+                except Exception as e:
+                    self.logger.warning(f"Failed to check status for {service_name} on {node_name}: {e}")
                     all_ready = False
-                    break
-            
+                    failed_nodes.append(node_name)
+
             if all_ready:
-                self.logger.info(f"Service {service_name} is ready on all nodes: {node_names}")
+                self.logger.info(f"Service {service_name} is ready on all {len(node_names)} nodes")
                 return True
-            
-            self.logger.debug(f"Service {service_name} not ready yet, waiting {check_interval}s...")
+
+            # 📊 提供详细的状态信息
+            elapsed = int(time.time() - start_time)
+            self.logger.info(f"Service {service_name} status ({elapsed}s/{timeout}s): {len(ready_nodes)} ready, {len(failed_nodes)} not ready")
+
+            if ready_nodes:
+                self.logger.debug(f"Ready nodes: {ready_nodes}")
+            if failed_nodes:
+                self.logger.debug(f"Not ready nodes: {failed_nodes}")
+
+            # 🔧 动态调整检查间隔
+            if failed_nodes:
+                consecutive_failures += 1
+                # 随着失败次数增加，延长检查间隔
+                check_interval = min(max_check_interval, 5 + consecutive_failures * 2)
+            else:
+                consecutive_failures = 0
+                check_interval = 5
+
+            # 🚨 如果连续失败太多次，可能有问题
+            if consecutive_failures >= max_consecutive_failures:
+                self.logger.warning(f"Service {service_name} has {consecutive_failures} consecutive check failures")
+
+            self.logger.debug(f"Service {service_name} not ready yet, waiting {check_interval}s... (attempt {consecutive_failures + 1})")
             time.sleep(check_interval)
-        
-        self.logger.error(f"Service {service_name} did not become ready within {timeout}s")
+
+        self.logger.error(f"Service {service_name} did not become ready within {timeout}s (ready: {len(ready_nodes)}/{len(node_names)})")
+        return False
+
+    def _is_permanent_failure(self, error_msg: str) -> bool:
+        """🚨 检查是否是永久性失败 - 不会自动恢复的错误
+
+        Args:
+            error_msg: 错误信息
+
+        Returns:
+            bool: 是否是永久性失败
+        """
+        if not error_msg:
+            return False
+
+        error_lower = error_msg.lower()
+
+        # 永久性失败的错误模式
+        permanent_failure_patterns = [
+            "image not found",
+            "manifest not found",
+            "no such file or directory",
+            "permission denied",
+            "invalid configuration",
+            "container failed to start",
+            "exited with code",
+            "cannot allocate memory"
+        ]
+
+        for pattern in permanent_failure_patterns:
+            if pattern in error_lower:
+                return True
+
         return False
     
     def wait_for_dependencies(self, service: ServiceDeployment, timeout: int = 600) -> bool:
@@ -223,24 +339,12 @@ class ServiceDependencyResolver:
                 results[service.name] = False
                 continue
             
-            # 在每个指定节点上部署服务
-            service_success = True
-            for node_name in service.nodes:
-                success = self.docker_manager.deploy_service(
-                    scenario_path, service, node_name, timeout
-                )
-                if not success:
-                    service_success = False
-                    self.logger.error(f"Failed to deploy {service.name} on {node_name}")
-                    break
-            
+            # 在所有指定节点上部署服务
+            service_success = self._deploy_service_on_nodes(scenario_path, service, timeout)
             results[service.name] = service_success
-            
+
             # 更新节点状态
-            if service_success:
-                service_node.status = DependencyStatus.RESOLVED
-            else:
-                service_node.status = DependencyStatus.FAILED
+            self._update_service_status(service_node, service_success)
         
         # 等待本批次所有服务就绪
         for service_node in batch:
@@ -259,6 +363,36 @@ class ServiceDependencyResolver:
         
         return results
     
+    def _deploy_service_on_nodes(self, scenario_path: Path, service: ServiceDeployment, timeout: int) -> bool:
+        """在所有指定节点上部署服务（同步版本）"""
+        for node_name in service.nodes:
+            success = self.docker_manager.deploy_service(
+                scenario_path, service, node_name, timeout
+            )
+            if not success:
+                self.logger.error(f"Failed to deploy {service.name} on {node_name}")
+                return False
+        return True
+
+    def _update_service_status(self, service_node: ServiceNode, success: bool):
+        """更新服务节点状态"""
+        if success:
+            service_node.status = DependencyStatus.RESOLVED
+            self.logger.info(f"Successfully deployed {service_node.service.name}")
+        else:
+            service_node.status = DependencyStatus.FAILED
+
+    async def _deploy_service_on_nodes_async(self, scenario_path: Path, service: ServiceDeployment, timeout: int) -> bool:
+        """在所有指定节点上部署服务（异步版本）"""
+        for node_name in service.nodes:
+            success = await self._deploy_service_on_node_async(
+                scenario_path, service, node_name, timeout
+            )
+            if not success:
+                self.logger.error(f"Failed to deploy {service.name} on {node_name}")
+                return False
+        return True
+
     def get_deployment_summary(self) -> Dict[str, any]:
         """获取部署摘要"""
         if not self.service_nodes:
@@ -305,3 +439,125 @@ class ServiceDependencyResolver:
                     )
                 except Exception as e:
                     self.logger.warning(f"Failed to cleanup {service_node.service.name} on {node_name}: {e}")
+
+    async def deploy_batch_concurrent(self, batch: List[ServiceNode], scenario_path,
+                                    max_concurrent: int = 5, timeout: int = 300) -> Dict[str, bool]:
+        """并发部署一批服务"""
+
+        self.logger.info(f"Deploying batch with {len(batch)} services concurrently (max_concurrent={max_concurrent})")
+
+        # 使用信号量控制并发度
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def deploy_single_service(service_node: ServiceNode) -> Tuple[str, bool]:
+            """部署单个服务"""
+            async with semaphore:
+                service = service_node.service
+
+                # 等待依赖
+                if not await self._wait_for_dependencies_async(service, timeout):
+                    self.logger.error(f"Dependencies not ready for {service.name}")
+                    return service.name, False
+
+                # 在所有指定节点上部署服务
+                service_success = await self._deploy_service_on_nodes_async(scenario_path, service, timeout)
+
+                # 更新节点状态
+                self._update_service_status(service_node, service_success)
+
+                return service.name, service_success
+
+        # 并发执行所有服务的部署
+        tasks = [deploy_single_service(service_node) for service_node in batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 处理结果
+        deployment_results = {}
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Service deployment task failed: {result}")
+                continue
+
+            service_name, success = result
+            deployment_results[service_name] = success
+
+        # 等待本批次所有成功的服务就绪
+        await self._wait_batch_services_ready(batch, deployment_results, timeout)
+
+        success_count = sum(1 for success in deployment_results.values() if success)
+        self.logger.info(f"Batch deployment completed: {success_count}/{len(batch)} successful")
+
+        return deployment_results
+
+    async def _wait_for_dependencies_async(self, service: ServiceDeployment, timeout: int = 600) -> bool:
+        """异步等待服务的所有依赖就绪"""
+        if not service.depends_on:
+            return True
+
+        try:
+            loop = asyncio.get_event_loop()
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, self.wait_for_dependencies, service, timeout
+                ),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            self.logger.error(f"Dependency wait timeout for service {service.name} after {timeout}s")
+            return False
+        except Exception as e:
+            self.logger.error(f"Dependency wait failed for service {service.name}: {str(e)}")
+            return False
+
+    async def _deploy_service_on_node_async(self, scenario_path, service: ServiceDeployment,
+                                          node_name: str, timeout: int) -> bool:
+        """在指定节点上异步部署服务"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, self.docker_manager.deploy_service, scenario_path, service, node_name, timeout
+                ),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            self.logger.error(f"Service {service.name} deployment timeout on node {node_name} after {timeout}s")
+            return False
+        except Exception as e:
+            self.logger.error(f"Service {service.name} deployment failed on node {node_name}: {str(e)}")
+            return False
+
+    async def _wait_batch_services_ready(self, batch: List[ServiceNode],
+                                       deployment_results: Dict[str, bool], timeout: int):
+        """等待批次中所有成功部署的服务就绪"""
+        async def wait_single_service_ready(service_node: ServiceNode) -> bool:
+            """等待单个服务就绪"""
+            service = service_node.service
+            if not deployment_results.get(service.name, False):
+                return False
+
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None, self.wait_for_service_ready, service.name, service.nodes, timeout
+            )
+
+        # 只等待部署成功的服务
+        ready_tasks = []
+        for service_node in batch:
+            if deployment_results.get(service_node.service.name, False):
+                ready_tasks.append(wait_single_service_ready(service_node))
+
+        if ready_tasks:
+            ready_results = await asyncio.gather(*ready_tasks, return_exceptions=True)
+
+            # 更新未就绪服务的状态
+            task_index = 0
+            for service_node in batch:
+                if deployment_results.get(service_node.service.name, False):
+                    if task_index < len(ready_results):
+                        result = ready_results[task_index]
+                        if isinstance(result, Exception) or not result:
+                            deployment_results[service_node.service.name] = False
+                            service_node.status = DependencyStatus.FAILED
+                            self.logger.error(f"Service {service_node.service.name} did not become ready")
+                    task_index += 1
