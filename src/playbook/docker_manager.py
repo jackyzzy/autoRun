@@ -481,60 +481,6 @@ class DockerComposeManager:
         
         return results
     
-    def cleanup_containers(self, node_names: List[str] = None,
-                          remove_images: bool = False) -> Dict[str, bool]:
-        """
-        清理Docker容器和资源
-        
-        Args:
-            node_names: 目标节点列表
-            remove_images: 是否删除镜像
-            
-        Returns:
-            Dict[node_name, success]
-        """
-        if node_names is None:
-            nodes = self.node_manager.get_nodes(enabled_only=True)
-            node_names = [node.name for node in nodes]
-        
-        self.logger.info(f"Cleaning up Docker resources on {len(node_names)} nodes")
-        
-        cleanup_commands = [
-            "docker container prune -f",  # 清理停止的容器
-            "docker network prune -f",    # 清理未使用的网络
-            "docker volume prune -f"      # 清理未使用的卷
-        ]
-        
-        if remove_images:
-            cleanup_commands.append("docker image prune -a -f")  # 清理未使用的镜像
-        
-        results = {}
-        for node_name in node_names:
-            node_success = True
-            
-            for cmd in cleanup_commands:
-                try:
-                    cmd_results = self.node_manager.execute_command(cmd, [node_name], timeout=120)
-                    node_result = cmd_results.get(node_name)
-                    
-                    if not node_result or node_result[0] != 0:
-                        node_success = False
-                        error_msg = node_result[2] if node_result else "Unknown error"
-                        self.logger.warning(f"Cleanup command failed on {node_name}: {cmd}, error: {error_msg}")
-                        
-                except Exception as e:
-                    node_success = False
-                    self.logger.error(f"Exception during cleanup on {node_name}: {e}")
-            
-            results[node_name] = node_success
-            
-            if node_success:
-                self.logger.info(f"Cleanup completed successfully on {node_name}")
-            else:
-                self.logger.warning(f"Cleanup completed with errors on {node_name}")
-        
-        return results
-    
     def get_compose_services(self, compose_file: str) -> List[str]:
         """
         从docker-compose文件获取服务列表

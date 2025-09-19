@@ -485,10 +485,9 @@ class ScenarioRunner:
         """清理场景环境"""
         logger.info("Cleaning up scenario environment")
         
-        # 清理临时文件
+        # 清理临时文件，可以继续添加清理命令
         cleanup_commands = [
-            f"rm -f /tmp/test_config_{scenario.name}.json",
-            "docker system prune -f"
+            f"rm -f /tmp/test_config_{scenario.name}.json"
         ]
         
         nodes = self.node_manager.get_nodes(enabled_only=True)

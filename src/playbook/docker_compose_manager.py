@@ -408,36 +408,39 @@ class DockerComposeManager:
             }
     
     def cleanup_node_compose_files(self, node_names: List[str]):
-        """清理节点上的compose文件"""
-        # 使用第一个节点构建down命令（假设所有节点版本相同，或者使用通用命令）
-        if node_names:
-            first_node = node_names[0]
+        """停止节点上的Docker Compose服务"""
+        if not node_names:
+            self.logger.warning("No nodes provided for cleanup")
+            return
+
+        self.logger.info(f"Stopping Docker Compose services on {len(node_names)} nodes")
+
+        success_count = 0
+        # 为每个节点单独构建和执行命令
+        for node_name in node_names:
             try:
+                # 为当前节点构建适配的down命令
                 down_cmd = self.node_manager.build_compose_command(
-                    node_name=first_node,
+                    node_name=node_name,
                     command_type="down",
-                    file="docker-compose.yml"  # 使用通用文件名
+                    file="docker-compose.yml"
                 )
-                cleanup_commands = [
-                    down_cmd.full_cmd.replace("docker-compose.yml", "*compose*.yml") + " --remove-orphans || true",
-                    "docker system prune -f"
-                ]
+
+                # 添加--remove-orphans参数并允许失败
+                full_cmd = down_cmd.full_cmd + " --remove-orphans || true"
+
+                # 在当前节点执行命令
+                results = self.node_manager.execute_command(full_cmd, [node_name], timeout=120)
+                node_result = results.get(node_name)
+
+                if node_result and node_result[0] == 0:
+                    success_count += 1
+                    self.logger.info(f"Docker Compose services stopped successfully on {node_name}")
+                else:
+                    error_msg = node_result[2] if node_result else "Unknown error"
+                    self.logger.warning(f"Failed to stop services on {node_name}: {error_msg}")
+
             except Exception as e:
-                self.logger.warning(f"Failed to build adaptive down command, using default: {e}")
-                cleanup_commands = [
-                    "docker compose down --remove-orphans || docker-compose down --remove-orphans || true",
-                    "docker system prune -f"
-                ]
-        else:
-            cleanup_commands = [
-                "docker compose down --remove-orphans || docker-compose down --remove-orphans || true",
-                "docker system prune -f"
-            ]
-        
-        for cmd in cleanup_commands:
-            try:
-                results = self.node_manager.execute_command(cmd, node_names, timeout=120)
-                success_count = sum(1 for r in results.values() if r[0] == 0)
-                self.logger.info(f"Cleanup command '{cmd}' executed on {success_count}/{len(node_names)} nodes")
-            except Exception as e:
-                self.logger.warning(f"Cleanup command failed: {e}")
+                self.logger.warning(f"Exception stopping services on {node_name}: {e}")
+
+        self.logger.info(f"Docker Compose cleanup completed on {success_count}/{len(node_names)} nodes")
