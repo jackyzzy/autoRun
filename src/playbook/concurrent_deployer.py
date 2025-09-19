@@ -103,20 +103,28 @@ class ConcurrentDeploymentLogger:
         """记录部署计划"""
         self.main_logger.info("\n" + "=" * 50)
         self.main_logger.info("=== Concurrent Deployment Plan ===")
-        self.main_logger.info(f"Total batches: {len(batches)}")
+        self.main_logger.info(f"🎯 Total batches: {len(batches)}")
 
         for i, batch in enumerate(batches, 1):
             service_names = [node.service.name for node in batch]
-            self.main_logger.info(f"Batch {i}: {service_names}")
+            self.main_logger.info(f"📦 Batch {i}/{len(batches)}: {service_names}")
 
         self.main_logger.info("=" * 50)
 
-    def log_batch_start(self, batch_num: int, services: List[ServiceNode]):
+    def log_batch_start(self, batch_num: int, services: List[ServiceNode], total_batches: int = None):
         """批次开始日志"""
         service_names = [s.service.name for s in services]
-        self.main_logger.info(f"\n=== Batch {batch_num} Deployment Start ===")
-        self.main_logger.info(f"Services: {', '.join(service_names)}")
-        self.main_logger.info(f"Concurrent deployment of {len(services)} services")
+        batch_label = f"Batch {batch_num}/{total_batches}" if total_batches else f"Batch {batch_num}"
+
+        # 计算总体进度
+        progress_percent = 0
+        if total_batches and total_batches > 0:
+            progress_percent = ((batch_num - 1) / total_batches) * 100
+
+        self.main_logger.info(f"\n🚀 === {batch_label} Deployment Start ===")
+        self.main_logger.info(f"📊 Overall progress: {progress_percent:.0f}% ({batch_num-1}/{total_batches} batches completed)" if total_batches else "")
+        self.main_logger.info(f"🎯 Services: {', '.join(service_names)}")
+        self.main_logger.info(f"⚡ Concurrent deployment of {len(services)} services")
 
     def log_service_progress(self, service_name: str, status: str, details: str = ""):
         """记录服务进度（线程安全）"""
@@ -134,19 +142,24 @@ class ConcurrentDeploymentLogger:
         else:
             self.main_logger.info(f"[{time_str}] {service_name}: {status}")
 
-    def log_batch_summary(self, batch_num: int, results: Dict[str, ServiceDeploymentResult]):
+    def log_batch_summary(self, batch_num: int, results: Dict[str, ServiceDeploymentResult], total_batches: int = None):
         """批次完成汇总日志"""
         successful = [name for name, result in results.items() if result.is_success]
         failed = [name for name, result in results.items() if result.is_failed]
 
-        self.main_logger.info(f"\n=== Batch {batch_num} Deployment Summary ===")
+        batch_label = f"Batch {batch_num}/{total_batches}" if total_batches else f"Batch {batch_num}"
+        progress_percent = (batch_num / total_batches) * 100 if total_batches else 0
+
+        self.main_logger.info(f"\n✅ === {batch_label} Deployment Summary ===")
+        if total_batches:
+            self.main_logger.info(f"📈 Overall progress: {progress_percent:.0f}% ({batch_num}/{total_batches} batches completed)")
 
         if successful:
-            self.main_logger.info(f"✓ Successful: {len(successful)} services")
+            self.main_logger.info(f"✅ Successful: {len(successful)} services")
             for service_name in successful:
                 result = results[service_name]
                 duration = result.duration
-                self.main_logger.info(f"  - {service_name} ({duration:.1f}s)")
+                self.main_logger.info(f"  ✓ {service_name} ({duration:.1f}s)")
 
         if failed:
             self.main_logger.error(f"✗ Failed: {len(failed)} services")
@@ -469,7 +482,7 @@ class ConcurrentServiceDeployer:
 
         # 批次间串行，批次内并发
         for i, batch in enumerate(batches, 1):
-            logger.log_batch_start(i, batch)
+            logger.log_batch_start(i, batch, len(batches))
 
             # 带重试的批次部署
             batch_results = await retry_strategy.deploy_batch_with_retry(
@@ -482,7 +495,7 @@ class ConcurrentServiceDeployer:
             )
 
             # 记录批次结果
-            logger.log_batch_summary(i, batch_results)
+            logger.log_batch_summary(i, batch_results, len(batches))
             all_results.update(batch_results)
 
             # 检查批次失败

@@ -7,13 +7,17 @@
 ```
 templates/
 ├── config/                 # 配置文件模板
-│   ├── nodes.yaml         # 节点配置模板（脱敏）
-│   ├── scenarios.yaml     # 场景配置模板（脱敏）
+│   ├── nodes.yaml         # 节点配置模板（脱敏版）
+│   ├── scenarios.yaml     # 场景配置模板（完整注释版）
 │   └── scenarios/         # 场景模板目录
-│       ├── metadata.yaml  # 场景元数据模板
-│       ├── docker-compose-pd.yaml  # Docker Compose配置模板
-│       ├── run_test.sh    # 测试执行脚本模板
-│       └── test_config.json  # 测试配置模板
+│       ├── 001xxxx_test/  # 基础场景模板
+│       │   ├── metadata.yaml              # 场景元数据模板（详细注释）
+│       │   ├── docker-compose-pd.yaml     # Docker Compose配置模板
+│       │   ├── test_config.json           # 基准测试配置模板
+│       │   └── test_config_commented.jsonc # 带注释的配置说明
+│       └── 002_with_dependencies/         # 复杂依赖关系场景模板
+│           ├── metadata.yml               # 复杂依赖配置示例
+│           └── docker-compose.yml         # 多服务依赖示例
 └── README.md              # 本文件
 ```
 
@@ -55,10 +59,12 @@ cp -r templates/config/* config/
 ### 场景配置 (`../config/scenarios.yaml`)
 
 控制场景的执行顺序和行为：
-- 执行模式选择
-- 自定义执行顺序
-- 过滤规则配置
-- 场景间等待和重试
+- 执行模式选择（auto/directory/custom）
+- 自定义执行顺序和过滤规则
+- 🚀 **并发部署配置**：基于依赖关系的智能并发部署
+- 🔄 **智能重试策略**：场景级和服务级重试机制
+- 🔒 **资源隔离配置**：确保场景间完全隔离
+- 场景间等待和错误处理
 
 ### 基准测试配置 (`../config/benchmark.yaml`)
 
@@ -91,6 +97,11 @@ export API_URL="http://your-api-server:8080"
 3. **配置验证**: 使用 playbook 的验证命令检查配置正确性
 4. **资源规划**: 在 `metadata.yml` 中明确资源需求
 5. **文档更新**: 添加新场景后更新相关文档
+6. **🚀 依赖设计**: 合理设计服务依赖关系，利用并发部署优势
+7. **🔒 场景隔离**: 利用系统的资源隔离机制，避免场景间相互影响
+8. **⚡ 并发调优**: 根据硬件环境调整`max_concurrent_services`等参数
+9. **🎯 健康检查**: 配置合适的健康检查策略，确保服务稳定性
+10. **📊 监控日志**: 启用详细日志，便于问题排查和性能分析
 
 ## 常用场景模式
 

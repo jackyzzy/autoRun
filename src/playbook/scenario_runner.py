@@ -19,6 +19,7 @@ from .docker_compose_manager import DockerComposeManager
 from .dependency_resolver import ServiceDependencyResolver
 from .health_check_manager import HealthCheckManager
 from .test_script_executor import TestScriptExecutor
+from .scenario_resource_manager import ScenarioResourceManager
 from .concurrent_deployer import (
     ConcurrentServiceDeployer, ConcurrentDeploymentLogger, ConcurrentRetryStrategy
 )
@@ -121,7 +122,9 @@ class ScenarioRunner:
         self.concurrent_deployer = ConcurrentServiceDeployer(
             self.docker_manager, self.dependency_resolver
         )
-        
+        # 资源管理组件
+        self.resource_manager = ScenarioResourceManager(node_manager)
+
         # 执行状态
         self.is_running = False
         self.current_scenario: Optional[str] = None
@@ -164,7 +167,13 @@ class ScenarioRunner:
                 
                 self.logger.info(f"Executing scenario {i+1}/{len(execution_order)}: {scenario_name}")
                 result = self.run_scenario(scenario_name)
-                
+
+                # 🧹 完全清理scenario后的所有资源，确保scenarios间完全隔离
+                self.logger.info(f"Cleaning up resources after scenario: {scenario_name}")
+                cleanup_success = self.resource_manager.cleanup_scenario_resources(scenario_name)
+                if not cleanup_success:
+                    self.logger.warning(f"Resource cleanup failed for scenario {scenario_name}, but continuing execution")
+
                 if result.is_failure and not self.continue_on_failure:
                     self.logger.error(f"Scenario {scenario_name} failed, stopping execution")
                     # 标记剩余场景为跳过
@@ -188,6 +197,15 @@ class ScenarioRunner:
         finally:
             self.is_running = False
             self.current_scenario = None
+
+            # 🧹 最终资源清理：确保所有资源都被彻底清理
+            self.logger.info("Performing final resource cleanup after all scenarios")
+            try:
+                self.resource_manager.force_clean_environment()
+                cleanup_stats = self.resource_manager.get_cleanup_stats()
+                self.logger.info(f"📊 Final cleanup stats: {cleanup_stats}")
+            except Exception as e:
+                self.logger.error(f"Final resource cleanup failed: {e}")
         
         return self.results
     
@@ -262,40 +280,38 @@ class ScenarioRunner:
         return result
     
     def _execute_scenario_steps(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """执行场景步骤（新的分布式部署流程）"""
+        """执行场景步骤（分布式部署流程）"""
         scenario_path = Path(scenario.directory)
-        
-        # 检查是否有部署配置
-        if scenario.metadata and scenario.metadata.deployment.services:
-            logger.info("Using advanced distributed deployment configuration")
-            
-            logger.info("\n\nStep 1: Validating deployment configuration")
-            self._validate_deployment_config(scenario, result, logger)
-            
-            logger.info("\n\nStep 2: Building service dependency graph")
-            self._build_service_dependencies(scenario, result, logger)
-            
-            logger.info("\n\nStep 3: Deploying services in dependency order")
-            self._deploy_services_with_dependencies(scenario, result, logger)
-            
-            logger.info("\n\nStep 4: Running comprehensive health checks")
-            self._run_comprehensive_health_checks(scenario, result, logger)
-            
-            logger.info("\n\nStep 5: Executing test scripts")
-            self._execute_test_scripts(scenario, result, logger)
-            
-            logger.info("\n\nStep 6: Collecting distributed results")
-            self._collect_distributed_results(scenario, result, logger)
-            
-            logger.info("\n\nStep 7: Stopping distributed services")
-            self._stop_distributed_services(scenario, result, logger)
-            
-            logger.info("\n\nStep 8: Cleaning up distributed environment")
-            self._cleanup_distributed_environment(scenario, result, logger)
-        else:
-            logger.info("Using legacy deployment mode")
-            # 保持向后兼容的简单模式
-            self._execute_legacy_scenario_steps(scenario, result, logger)
+
+        # 验证必须配置
+        if not scenario.metadata or not scenario.metadata.services:
+            raise RuntimeError(f"Scenario {scenario.name} missing required services configuration")
+
+        logger.info("Using distributed deployment configuration")
+
+        logger.info("\n\nStep 1: Validating deployment configuration")
+        self._validate_deployment_config(scenario, result, logger)
+
+        logger.info("\n\nStep 2: Building service dependency graph")
+        self._build_service_dependencies(scenario, result, logger)
+
+        logger.info("\n\nStep 3: Deploying services in dependency order")
+        self._deploy_services_with_dependencies(scenario, result, logger)
+
+        logger.info("\n\nStep 4: Running comprehensive health checks")
+        self._run_comprehensive_health_checks(scenario, result, logger)
+
+        logger.info("\n\nStep 5: Executing test scripts")
+        self._execute_test_scripts(scenario, result, logger)
+
+        logger.info("\n\nStep 6: Collecting distributed results")
+        self._collect_distributed_results(scenario, result, logger)
+
+        logger.info("\n\nStep 7: Stopping distributed services")
+        self._stop_distributed_services(scenario, result, logger)
+
+        logger.info("\n\nStep 8: Cleaning up distributed environment")
+        self._cleanup_distributed_environment(scenario, result, logger)
     
     def _prepare_scenario_environment(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """准备场景环境"""
@@ -324,99 +340,6 @@ class ScenarioRunner:
                 node_names
             )
             logger.info("Uploaded test configuration to nodes")
-    
-    def _start_inference_services(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """启动推理服务"""
-        logger.info("Starting inference services")
-        
-        compose_file = scenario.get_docker_compose_path()
-        if not compose_file or not Path(compose_file).exists():
-            raise RuntimeError(f"Docker Compose file not found: {compose_file}")
-        
-        # 在每个节点上启动服务
-        nodes = self.node_manager.get_nodes(enabled_only=True)
-        
-        for node in nodes:
-            logger.info(f"Starting services on node {node.name}")
-            
-            # 使用适配器构建并执行启动命令
-            compose_cmd = self.node_manager.build_compose_command(
-                node_name=node.name,
-                command_type="up",
-                file=compose_file
-            )
-
-            full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
-            results = self.node_manager.execute_command(full_cmd, [node.name])
-            
-            node_result = results.get(node.name)
-            if not node_result or node_result[0] != 0:
-                error_msg = node_result[2] if node_result else "Unknown error"
-                raise RuntimeError(f"Failed to start services on {node.name}: {error_msg}")
-            
-            logger.info(f"Services started successfully on {node.name}")
-    
-    def _wait_for_services_ready(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """等待服务就绪"""
-        logger.info("Waiting for services to be ready")
-        
-        max_wait_time = 300  # 5分钟
-        check_interval = 10   # 10秒
-        
-        start_time = time.time()
-        nodes = self.node_manager.get_nodes(enabled_only=True)
-        
-        while time.time() - start_time < max_wait_time:
-            all_ready = True
-            
-            for node in nodes:
-                # 检查Docker服务状态
-                check_cmd = "docker ps --format '{{.Names}}\\t{{.Status}}' | grep -E '(Up|healthy)'"
-                results = self.node_manager.execute_command(check_cmd, [node.name])
-                
-                node_result = results.get(node.name)
-                if not node_result or node_result[0] != 0:
-                    all_ready = False
-                    break
-                
-                # 可以添加更多健康检查
-                # 例如：检查API端点是否响应
-            
-            if all_ready:
-                logger.info("All services are ready")
-                return
-            
-            logger.info(f"Services not ready yet, waiting {check_interval} seconds...")
-            time.sleep(check_interval)
-        
-        raise RuntimeError("Services did not become ready within timeout")
-    
-    def _run_benchmark_tests(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """运行基准测试"""
-        logger.info("Running benchmark tests")
-        
-        # 这里会由BenchmarkRunner实现具体逻辑
-        # 暂时用占位符实现
-        test_script = scenario.get_run_script_path()
-        if test_script and Path(test_script).exists():
-            logger.info(f"Found test script: {test_script}")
-            # 实际执行将在BenchmarkRunner中实现
-        
-        # 模拟测试执行时间
-        estimated_time = 0
-        if scenario.metadata and scenario.metadata.estimated_duration:
-            estimated_time = scenario.metadata.estimated_duration
-            logger.info(f"Estimated test duration: {estimated_time} seconds")
-        
-        # 这里应该调用BenchmarkRunner来执行实际测试
-        logger.info("Benchmark test execution placeholder")
-        
-        # 记录测试指标
-        result.metrics = {
-            'test_start_time': datetime.now().isoformat(),
-            'estimated_duration': estimated_time,
-            'test_type': 'benchmark'
-        }
     
     def _collect_test_results(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """收集测试结果"""
@@ -547,7 +470,7 @@ class ScenarioRunner:
     def _validate_deployment_config(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """验证部署配置"""
         scenario_path = Path(scenario.directory)
-        services = scenario.metadata.deployment.services
+        services = scenario.metadata.services
         
         logger.info(f"Validating deployment config for {len(services)} services")
         
@@ -565,7 +488,7 @@ class ScenarioRunner:
         
     def _build_service_dependencies(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """构建服务依赖图"""
-        services = scenario.metadata.deployment.services
+        services = scenario.metadata.services
         
         logger.info("Building service dependency graph")
         
@@ -607,12 +530,8 @@ class ScenarioRunner:
         # 创建并发部署日志器
         deployment_logger = ConcurrentDeploymentLogger(logger)
 
-        # 检查是否启用并发部署
-        if max_concurrent_services <= 1:
-            logger.info("Concurrent deployment disabled, using legacy serial deployment")
-            self._deploy_services_legacy(scenario, result, logger, batches, scenario_path)
-            return
-
+        # 确保使用并发部署
+        max_concurrent_services = max(2, max_concurrent_services)
         logger.info(f"Using concurrent deployment with max_concurrent_services={max_concurrent_services}")
 
         # 使用并发部署器
@@ -624,14 +543,14 @@ class ScenarioRunner:
                 )
             )
 
-            # 转换结果格式以保持兼容性
-            legacy_results = {
+            # 转换结果格式
+            service_results = {
                 name: result.is_success
                 for name, result in deployment_results.items()
             }
 
             # 记录部署结果到result.metrics
-            result.metrics['service_deployment'] = legacy_results
+            result.metrics['service_deployment'] = service_results
             result.metrics['deployment_summary'] = self.dependency_resolver.get_deployment_summary()
             result.metrics['concurrent_deployment_details'] = {
                 name: {
@@ -649,32 +568,9 @@ class ScenarioRunner:
             logger.error(f"Concurrent deployment failed: {e}")
             raise
 
-    def _deploy_services_legacy(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger,
-                               batches, scenario_path):
-        """传统串行部署（作为fallback）"""
-        deployment_results = {}
-
-        for i, batch in enumerate(batches, 1):
-            logger.info(f"Deploying batch {i}/{len(batches)}")
-
-            batch_results = self.dependency_resolver.deploy_batch(batch, scenario_path)
-            deployment_results.update(batch_results)
-
-            # 检查批次是否有失败
-            failed_services = [name for name, success in batch_results.items() if not success]
-            if failed_services:
-                logger.error(f"Batch {i} deployment failed for services: {failed_services}")
-                raise RuntimeError(f"Service deployment failed: {failed_services}")
-
-            logger.info(f"Batch {i} deployed successfully")
-
-        # 记录部署结果到result.metrics
-        result.metrics['service_deployment'] = deployment_results
-        result.metrics['deployment_summary'] = self.dependency_resolver.get_deployment_summary()
-    
     def _run_comprehensive_health_checks(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """运行全面健康检查（支持并发）"""
-        services = scenario.metadata.deployment.services
+        services = scenario.metadata.services
 
         # 获取并发配置
         execution_config = getattr(self.scenario_manager, 'execution_config', {})
@@ -688,7 +584,8 @@ class ScenarioRunner:
         health_results = self.health_checker.run_batch_health_checks(
             services,
             parallel=True,
-            max_workers=max_concurrent_health_checks
+            max_workers=max_concurrent_health_checks,
+            timeout=health_check_timeout
         )
 
         # 聚合结果
@@ -710,7 +607,7 @@ class ScenarioRunner:
     
     def _execute_test_scripts(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """执行测试脚本"""
-        test_config = scenario.metadata.deployment.test_execution
+        test_config = scenario.metadata.test_execution
         
         if not test_config.wait_for_all_services:
             logger.info("Skipping service readiness wait as configured")
@@ -747,8 +644,8 @@ class ScenarioRunner:
     
     def _collect_distributed_results(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """收集分布式结果"""
-        services = scenario.metadata.deployment.services
-        test_config = scenario.metadata.deployment.test_execution
+        services = scenario.metadata.services
+        test_config = scenario.metadata.test_execution
         
         logger.info("Collecting distributed results")
         
@@ -792,7 +689,7 @@ class ScenarioRunner:
     def _stop_distributed_services(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """停止分布式服务（支持并发）"""
         scenario_path = Path(scenario.directory)
-        services = scenario.metadata.deployment.services
+        services = scenario.metadata.services
 
         # 获取并发配置
         execution_config = getattr(self.scenario_manager, 'execution_config', {})
@@ -805,11 +702,9 @@ class ScenarioRunner:
         # 按反向依赖顺序停止服务（先停止依赖方）
         batches = list(reversed(self.dependency_resolver.get_deployment_batches()))
 
-        # 检查是否启用并发停止
-        if max_concurrent_services <= 1:
-            logger.info("Concurrent stop disabled, using serial stop")
-            self._stop_services_legacy(scenario, result, logger, batches, scenario_path)
-            return
+        # 确保使用并发停止
+        max_concurrent_services = max(2, max_concurrent_services)
+        logger.info(f"Using concurrent stop with max_concurrent_services={max_concurrent_services}")
 
         # 使用并发停止
         try:
@@ -856,30 +751,9 @@ class ScenarioRunner:
 
             logger.info(f"Batch {i} stop completed")
 
-    def _stop_services_legacy(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger,
-                             batches, scenario_path):
-        """传统串行停止（作为fallback）"""
-        for i, batch in enumerate(batches, 1):
-            logger.info(f"Stopping batch {i}/{len(batches)}")
-
-            for service_node in batch:
-                service = service_node.service
-
-                for node_name in service.nodes:
-                    try:
-                        success = self.docker_manager.stop_service(
-                            scenario_path, service, node_name, timeout=120
-                        )
-                        if success:
-                            logger.info(f"Stopped {service.name} on {node_name}")
-                        else:
-                            logger.warning(f"Failed to stop {service.name} on {node_name}")
-                    except Exception as e:
-                        logger.warning(f"Error stopping {service.name} on {node_name}: {e}")
-    
     def _cleanup_distributed_environment(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """清理分布式环境"""
-        services = scenario.metadata.deployment.services
+        services = scenario.metadata.services
         
         logger.info("Cleaning up distributed environment")
         
@@ -898,25 +772,3 @@ class ScenarioRunner:
         
         logger.info(f"Cleanup completed for {len(node_names)} nodes")
     
-    def _execute_legacy_scenario_steps(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """执行传统场景步骤（向后兼容）"""
-        logger.info("Step 1: Preparing scenario environment")
-        self._prepare_scenario_environment(scenario, result, logger)
-        
-        logger.info("Step 2: Starting inference services")
-        self._start_inference_services(scenario, result, logger)
-        
-        logger.info("Step 3: Waiting for services to be ready")
-        self._wait_for_services_ready(scenario, result, logger)
-        
-        logger.info("Step 4: Running benchmark tests")
-        self._run_benchmark_tests(scenario, result, logger)
-        
-        logger.info("Step 5: Collecting test results")
-        self._collect_test_results(scenario, result, logger)
-        
-        logger.info("Step 6: Stopping inference services")
-        self._stop_inference_services(scenario, result, logger)
-        
-        logger.info("Step 7: Cleaning up scenario environment")
-        self._cleanup_scenario_environment(scenario, result, logger)

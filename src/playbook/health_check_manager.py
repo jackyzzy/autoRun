@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .scenario_manager import ServiceHealthCheck, ServiceDeployment
 from .node_manager import NodeManager
 from .docker_container_service import DockerContainerService
+from ..utils.progress_logger import EnhancedProgressLogger
 
 
 class HealthCheckType(Enum):
@@ -249,6 +250,7 @@ class HealthCheckManager:
     def __init__(self, node_manager: NodeManager):
         self.logger = logging.getLogger("playbook.health_check_manager")
         self.node_manager = node_manager
+        self.progress_logger = EnhancedProgressLogger(self.logger)
         
     def create_checker(self, service: ServiceDeployment) -> ServiceHealthChecker:
         """创建服务健康检查器"""
@@ -263,43 +265,72 @@ class HealthCheckManager:
         checker = self.create_checker(service)
         results = {}
         
-        # 等待启动宽限期
+        # 系统级超时控制
+        start_time = time.time()
+
+        # 等待启动宽限期 - 使用倒计时显示
         if service.health_check.startup_grace_period > 0:
-            self.logger.info(f"Waiting {service.health_check.startup_grace_period}s grace period for {service.name}")
-            time.sleep(service.health_check.startup_grace_period)
-        
+            grace_period = service.health_check.startup_grace_period
+            self.progress_logger.log_waiting_with_countdown(
+                total_seconds=grace_period,
+                message=f"Startup grace period for {service.name}",
+                interval=10 if grace_period >= 30 else 5  # 长时间等待用10s间隔，短时间用5s
+            )
+
         # 在每个部署节点上进行健康检查
         for node_name in service.nodes:
             node_results = []
-            
+
             # 重试机制
             for attempt in range(service.health_check.max_retries + 1):
+                # 检查是否超过系统级超时
+                if timeout and (time.time() - start_time) > timeout:
+                    self.logger.warning(f"Health check timeout ({timeout}s) exceeded for {service.name} on {node_name}")
+                    break
+
                 if attempt > 0:
-                    self.logger.info(f"Health check retry {attempt} for {service.name} on {node_name}")
-                    time.sleep(service.health_check.retry_delay)
+                    # 显示重试进度
+                    self.progress_logger.log_retry_progress(
+                        current_attempt=attempt + 1,
+                        max_attempts=service.health_check.max_retries + 1,
+                        operation=f"Health check for {service.name} on {node_name}",
+                        delay=service.health_check.retry_delay
+                    )
                 
+                # 执行健康检查并显示详细进度
+                self.logger.info(f"🔍 Running health checks for {service.name} on {node_name} (attempt {attempt + 1})")
                 check_results = checker.run_comprehensive_check(node_name)
-                
+
+                # 显示各项检查的结果
+                for result in check_results:
+                    status_icon = "✅" if result.success else "❌"
+                    self.logger.info(f"  {status_icon} {result.check_type}: {result.message}")
+
                 # 检查是否所有必需的检查都通过
                 required_checks = [r for r in check_results if self._is_required_check(r, service)]
                 all_required_passed = all(r.success for r in required_checks)
-                
+
                 if all_required_passed:
+                    self.logger.info(f"✅ All health checks passed for {service.name} on {node_name}")
                     node_results = check_results
                     break
                 else:
                     # 记录失败的检查
                     failed_checks = [r for r in required_checks if not r.success]
-                    self.logger.warning(
-                        f"Health check attempt {attempt + 1} failed for {service.name} on {node_name}. "
-                        f"Failed checks: {[r.check_type for r in failed_checks]}"
-                    )
+                    failed_types = [r.check_type for r in failed_checks]
+                    self.logger.warning(f"❌ Health check attempt {attempt + 1} failed for {service.name} on {node_name}")
+                    self.logger.warning(f"   Failed checks: {failed_types}")
                     
                     if attempt == service.health_check.max_retries:
                         node_results = check_results  # 保存最后一次的结果
             
             results[node_name] = node_results
-        
+
+            # 检查系统级超时
+            if timeout and (time.time() - start_time) > timeout:
+                self.logger.warning(f"Health check timeout ({timeout}s) exceeded, stopping remaining nodes for {service.name}")
+                break
+
         return results
     
     def _is_required_check(self, result: HealthCheckResult, service: ServiceDeployment) -> bool:
@@ -376,7 +407,7 @@ class HealthCheckManager:
         
         return summary
     
-    def run_batch_health_checks(self, services: List[ServiceDeployment], parallel: bool = True, max_workers: int = 4) -> Dict[str, Dict[str, List[HealthCheckResult]]]:
+    def run_batch_health_checks(self, services: List[ServiceDeployment], parallel: bool = True, max_workers: int = 4, timeout: int = None) -> Dict[str, Dict[str, List[HealthCheckResult]]]:
         """批量运行多个服务的健康检查"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
@@ -386,7 +417,7 @@ class HealthCheckManager:
             # 并行执行健康检查
             with ThreadPoolExecutor(max_workers=min(len(services), max_workers)) as executor:
                 future_to_service = {
-                    executor.submit(self.run_service_health_check, service): service.name 
+                    executor.submit(self.run_service_health_check, service, timeout): service.name
                     for service in services
                 }
                 
@@ -403,7 +434,7 @@ class HealthCheckManager:
             # 串行执行健康检查
             for service in services:
                 try:
-                    service_results = self.run_service_health_check(service)
+                    service_results = self.run_service_health_check(service, timeout)
                     results[service.name] = service_results
                     self.logger.info(f"Completed health check for service: {service.name}")
                 except Exception as e:

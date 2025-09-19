@@ -20,13 +20,13 @@ class ServiceHealthCheck:
     """服务健康检查配置"""
     enabled: bool = True
     strategy: str = "standard"  # minimal/standard/comprehensive
-    startup_timeout: int = 300
+    startup_timeout: int = 60
     startup_grace_period: int = 60
     check_interval: int = 15
     max_retries: int = 10
     checks: List[Dict[str, Any]] = field(default_factory=list)
     failure_action: str = "retry"  # retry/skip/abort
-    retry_delay: int = 30
+    retry_delay: int = 10
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ServiceHealthCheck':
@@ -102,14 +102,36 @@ class ScenarioMetadata:
     resource_requirements: Dict[str, Any] = field(default_factory=dict)
     author: str = ""
     created: str = ""
-    deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
+    services: List[ServiceDeployment] = field(default_factory=list)
+    test_execution: TestExecution = field(default_factory=TestExecution)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ScenarioMetadata':
-        # 处理deployment字段
-        deployment_data = data.pop('deployment', {})
-        metadata = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-        metadata.deployment = DeploymentConfig.from_dict(deployment_data)
+        # 支持新旧格式的兼容性处理
+        data_copy = data.copy()
+
+        # 新格式：直接包含services和test_execution
+        if 'services' in data_copy:
+            services_data = data_copy.pop('services', [])
+            test_execution_data = data_copy.pop('test_execution', {})
+
+            metadata = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
+            metadata.services = [ServiceDeployment.from_dict(s) for s in services_data]
+            metadata.test_execution = TestExecution.from_dict(test_execution_data)
+
+        # 旧格式：通过deployment字段
+        elif 'deployment' in data_copy:
+            deployment_data = data_copy.pop('deployment', {})
+            metadata = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
+
+            deployment_config = DeploymentConfig.from_dict(deployment_data)
+            metadata.services = deployment_config.services
+            metadata.test_execution = deployment_config.test_execution
+
+        # 默认情况
+        else:
+            metadata = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
+
         return metadata
     
     def to_dict(self) -> Dict[str, Any]:
@@ -124,13 +146,13 @@ class ScenarioMetadata:
             'author': self.author,
             'created': self.created
         }
-        
-        # 只在有部署配置时包含deployment
-        if self.deployment.services or self.deployment.test_execution.node != "local":
-            result['deployment'] = {
-                'services': [service.__dict__ for service in self.deployment.services],
-                'test_execution': self.deployment.test_execution.__dict__
-            }
+
+        # 使用新格式：直接包含services和test_execution
+        if self.services:
+            result['services'] = [service.__dict__ for service in self.services]
+
+        if self.test_execution.node != "local" or self.test_execution.script != "run_test.sh":
+            result['test_execution'] = self.test_execution.__dict__
             
         return result
 

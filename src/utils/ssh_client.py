@@ -6,6 +6,7 @@ SSH客户端工具模块
 import paramiko
 import socket
 import logging
+import hashlib
 from typing import Dict, List, Optional, Tuple, Any
 from contextlib import contextmanager
 import time
@@ -169,7 +170,36 @@ class SSHClient:
                 results.append((-1, "", str(e)))
                 
         return results
-    
+
+    def calculate_file_hash(self, file_path: str, algorithm: str = 'md5') -> str:
+        """计算文件哈希值
+
+        Args:
+            file_path: 文件路径
+            algorithm: 哈希算法 ('md5', 'sha256')
+
+        Returns:
+            文件的哈希值
+        """
+        try:
+            hash_obj = hashlib.new(algorithm)
+            with open(file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_obj.update(chunk)
+            return hash_obj.hexdigest()
+        except Exception as e:
+            self.logger.error(f"Failed to calculate {algorithm} hash for {file_path}: {e}")
+            raise SSHExecutionError(f"Hash calculation failed: {e}")
+
+    def _cleanup_failed_upload(self, remote_path: str) -> None:
+        """清理上传失败的远程文件"""
+        try:
+            if self.sftp:
+                self.sftp.remove(remote_path)
+                self.logger.info(f"Cleaned up corrupted remote file: {remote_path}")
+        except Exception as cleanup_error:
+            self.logger.warning(f"Failed to cleanup corrupted remote file {remote_path}: {cleanup_error}")
+
     def upload_file(self, local_path: str, remote_path: str) -> bool:
         """上传文件到远程服务器"""
         if not self.is_connected():
@@ -187,45 +217,59 @@ class SSHClient:
             # 上传文件
             self.sftp.put(local_path, remote_path)
 
-            # 验证上传结果
+            # 分层验证上传结果
             try:
+                # 第一层：快速大小检查
                 local_size = os.path.getsize(local_path)
                 remote_stat = self.sftp.stat(remote_path)
                 remote_size = remote_stat.st_size
 
                 if local_size != remote_size:
                     self.logger.error(f"File size mismatch after upload: local={local_size}, remote={remote_size}")
-
-                    # 清理上传失败的文件
-                    try:
-                        self.sftp.remove(remote_path)
-                        self.logger.info(f"Cleaned up corrupted remote file: {remote_path}")
-                    except Exception as cleanup_error:
-                        self.logger.warning(f"Failed to cleanup corrupted remote file {remote_path}: {cleanup_error}")
-
+                    self._cleanup_failed_upload(remote_path)
                     raise SSHExecutionError(f"File upload verification failed: size mismatch (local={local_size}, remote={remote_size})")
 
-                self.logger.info(f"Uploaded {local_path} to {remote_path} (size: {local_size} bytes)")
+                self.logger.info(f"Size verification passed: {local_size} bytes")
+
+                # 第二层：MD5 哈希完整性验证
+                local_hash = self.calculate_file_hash(local_path, 'md5')
+
+                # 在远程计算 MD5
+                hash_cmd = f"md5sum {remote_path} 2>/dev/null | cut -d' ' -f1 || openssl dgst -md5 {remote_path} | cut -d' ' -f2"
+                exit_code, remote_hash_output, stderr = self.execute_command(hash_cmd, timeout=30, check_exit_code=False)
+
+                if exit_code != 0:
+                    self.logger.warning(f"Failed to calculate remote MD5, fallback to basic verification: {stderr}")
+                    # 回退到基本的可读性检查
+                    try:
+                        with self.sftp.open(remote_path, 'r') as remote_file:
+                            remote_file.read(100)
+                        self.logger.info(f"Upload verification: file {remote_path} appears readable")
+                    except Exception as read_error:
+                        self.logger.error(f"Upload verification failed: cannot read remote file {remote_path}: {read_error}")
+                        self._cleanup_failed_upload(remote_path)
+                        raise SSHExecutionError(f"File upload failed: remote file is not readable: {read_error}")
+                else:
+                    remote_hash = remote_hash_output.strip()
+
+                    if local_hash != remote_hash:
+                        self.logger.error(f"MD5 hash mismatch after upload:")
+                        self.logger.error(f"  Local MD5:  {local_hash}")
+                        self.logger.error(f"  Remote MD5: {remote_hash}")
+                        self._cleanup_failed_upload(remote_path)
+                        raise SSHExecutionError(f"File upload verification failed: MD5 mismatch (local={local_hash}, remote={remote_hash})")
+
+                    self.logger.info(f"MD5 verification passed: {local_hash}")
+
+                self.logger.info(f"Successfully uploaded {local_path} to {remote_path} (size: {local_size} bytes)")
+
             except SSHExecutionError:
                 # 重新抛出验证错误
                 raise
             except Exception as e:
-                self.logger.warning(f"Could not verify upload size: {e}")
-                # 如果无法验证，尝试读取远程文件的一小部分来确认上传成功
-                try:
-                    with self.sftp.open(remote_path, 'r') as remote_file:
-                        # 尝试读取前几个字节
-                        remote_file.read(100)
-                    self.logger.info(f"Upload verification: file {remote_path} appears readable")
-                except Exception as read_error:
-                    self.logger.error(f"Upload verification failed: cannot read remote file {remote_path}: {read_error}")
-                    # 清理可能损坏的文件
-                    try:
-                        self.sftp.remove(remote_path)
-                        self.logger.info(f"Cleaned up unreadable remote file: {remote_path}")
-                    except:
-                        pass
-                    raise SSHExecutionError(f"File upload failed: remote file is not readable: {read_error}")
+                self.logger.error(f"Upload verification failed with exception: {e}")
+                self._cleanup_failed_upload(remote_path)
+                raise SSHExecutionError(f"File upload verification failed: {e}")
 
             return True
             
@@ -354,10 +398,24 @@ class SSHConnectionPool:
     
     def close_all(self):
         """关闭所有连接"""
-        for client in self.connections.values():
-            client.disconnect()
+        connection_count_before = len(self.connections)
+        if connection_count_before == 0:
+            self.logger.debug("No SSH connections to close")
+            return
+
+        self.logger.info(f"Closing {connection_count_before} SSH connections...")
+
+        # 记录关闭前的连接详情
+        for key, client in self.connections.items():
+            try:
+                is_connected = client.is_connected()
+                self.logger.debug(f"Closing connection: {key} (connected: {is_connected})")
+                client.disconnect()
+            except Exception as e:
+                self.logger.warning(f"Error closing connection {key}: {e}")
+
         self.connections.clear()
-        self.logger.info("Closed all SSH connections")
+        self.logger.info(f"Successfully closed {connection_count_before} SSH connections")
     
     def get_connection_count(self) -> int:
         """获取活动连接数"""
@@ -366,6 +424,72 @@ class SSHConnectionPool:
     def get_connection_info(self) -> Dict[str, bool]:
         """获取连接信息"""
         return {key: client.is_connected() for key, client in self.connections.items()}
+
+    def force_cleanup_with_verification(self) -> Dict[str, Any]:
+        """强制清理连接池并验证结果
+
+        Returns:
+            Dict containing cleanup results and verification status
+        """
+        cleanup_result = {
+            'initial_connections': self.get_connection_count(),
+            'cleanup_successful': False,
+            'final_connections': 0,
+            'errors': [],
+            'verification_passed': False
+        }
+
+        try:
+            self.logger.info("🔧 Starting force cleanup with verification...")
+
+            # 记录初始状态
+            initial_info = self.get_connection_info()
+            cleanup_result['initial_connection_details'] = initial_info
+
+            # 执行强制清理
+            self.close_all()
+
+            # 短暂等待确保清理完成
+            import time
+            time.sleep(0.2)
+
+            # 验证清理结果
+            final_count = self.get_connection_count()
+            cleanup_result['final_connections'] = final_count
+            cleanup_result['cleanup_successful'] = True
+
+            # 验证是否真的清理干净
+            if final_count == 0:
+                cleanup_result['verification_passed'] = True
+                self.logger.info("✅ Force cleanup verification passed - connection pool is completely clean")
+            else:
+                cleanup_result['verification_passed'] = False
+                remaining_connections = self.get_connection_info()
+                cleanup_result['remaining_connections'] = remaining_connections
+                self.logger.warning(f"⚠️ Force cleanup verification failed - {final_count} connections remain")
+
+        except Exception as e:
+            cleanup_result['errors'].append(str(e))
+            self.logger.error(f"Force cleanup failed: {e}")
+
+        return cleanup_result
+
+    def get_detailed_status(self) -> Dict[str, Any]:
+        """获取连接池的详细状态信息"""
+        total_connections = self.get_connection_count()
+        connection_info = self.get_connection_info()
+
+        connected_count = sum(1 for is_connected in connection_info.values() if is_connected)
+        disconnected_count = total_connections - connected_count
+
+        return {
+            'total_connections': total_connections,
+            'connected_count': connected_count,
+            'disconnected_count': disconnected_count,
+            'max_connections': self.max_connections,
+            'connection_details': connection_info,
+            'pool_utilization': f"{total_connections}/{self.max_connections}"
+        }
 
 
 # 全局连接池实例

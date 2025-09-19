@@ -1,0 +1,99 @@
+{
+  // 基准测试配置文件模板
+  // 此文件定义了AICP基准测试的各项参数
+  // 使用时请复制并重命名为test_config.json
+
+  // 🌐 服务连接配置
+  // 测试目标服务的基础URL
+  // 📖 格式：http://host:port 或 https://host:port
+  // 🎯 用途：AICP基准测试工具会向此地址发送请求
+  // ⚠️  注意：确保端口与docker-compose.yml中的映射一致
+  "base_url": "http://10.112.0.201:18008",
+
+  // 🤖 模型配置
+  // 推理模型的路径
+  // 📖 说明：模型文件在容器内的挂载路径
+  // 💡 建议：使用绝对路径，确保容器可以访问
+  "model": "/data/your-model-path",
+
+  // 分词器路径
+  // 📖 说明：tokenizer文件的路径，可以是相对或绝对路径
+  "tokenizer_path": "./tokenizer",
+
+  // 📊 数据集配置
+  // 测试数据集文件路径
+  // 📖 支持格式：ShareGPT, AlpacaEval等
+  "dataset_path": "ShareGPT_V3_10000.json",
+
+  // 数据集类型
+  // 📖 支持类型：sharegpt, alpaca, custom
+  "dataset_name": "sharegpt",
+
+  // ⚡ 测试负载配置
+  // 测试提示数量
+  // 📖 说明：从数据集中选取的测试样本数量
+  // ⚙️  范围：1-100000，推荐值：100-10000
+  // 💡 调优：小数值用于快速测试，大数值用于压力测试
+  "num_prompts": 1000,
+
+  // 最大并发数
+  // 📖 说明：同时发送请求的最大并发连接数
+  // ⚙️  范围：1-1000，推荐值：10-100
+  // 🎯 用途：控制测试压力，避免过载目标服务
+  // 💡 调优建议：
+  //    - 性能测试：20-100
+  //    - 稳定性测试：5-20
+  //    - 压力测试：50-200
+  "max_concurrency": 20,
+
+  // 📝 ShareGPT数据集特定配置
+  // 输入序列长度
+  // 📖 说明：每个测试样本的最大输入token数
+  "sharegpt_input_len": 4096,
+
+  // 输出序列长度
+  // 📖 说明：期望生成的最大输出token数
+  "sharegpt_output_len": 1024,
+
+  // 提示长度缩放因子
+  // 📖 说明：控制提示长度的随机变化范围
+  // ⚙️  范围：0.0-1.0，推荐值：0.1-0.3
+  "sharegpt_prompt_len_scale": 0.1,
+
+  // 是否使用相同提示
+  // 📖 说明：true=所有请求使用相同提示（测试缓存效果）
+  //         false=使用不同提示（测试真实负载）
+  "enable_same_prompt": true,
+
+  // 📋 测试元数据
+  // 此信息会包含在测试报告中，用于识别和分类测试结果
+  "metadata": {
+    // 场景名称（应与metadata.yaml中的name一致）
+    "scenario": "template_scenario",
+
+    // 系统架构（x86, arm64等）
+    "arch": "x86",
+
+    // GPU型号
+    "gpu": "NVIDIA H200",
+
+    // GPU数量
+    "gpu_num": 4,
+
+    // 服务副本数
+    "replicas": 2,
+
+    // 推理后端类型
+    "backend": "sglang410",
+
+    // 配置类型标识
+    "config_type": "template"
+  }
+
+  // 💡 配置建议：
+  // 1. 根据硬件资源调整num_prompts和max_concurrency
+  // 2. base_url必须与docker-compose.yml中的端口映射匹配
+  // 3. 模型路径必须在容器内可访问
+  // 4. 元数据信息要准确，便于结果分析
+  // 5. 首次测试建议使用较小的num_prompts验证配置
+}
