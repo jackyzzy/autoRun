@@ -129,8 +129,11 @@ class ScenarioResourceManager:
                 return False
 
     def _cleanup_ssh_connections(self):
-        """强制清理所有SSH连接和SFTP会话"""
+        """强制清理所有SSH连接和SFTP会话（增强版）"""
         self.logger.info("🔌 Cleaning up SSH connections and SFTP sessions...")
+
+        # 记录清理开始时间用于统计
+        self._ssh_cleanup_start_time = time.time()
 
         # 获取清理前的详细状态
         initial_status = ssh_pool.get_detailed_status()
@@ -141,23 +144,41 @@ class ScenarioResourceManager:
             for conn_key, is_connected in initial_status['connection_details'].items():
                 self.logger.info(f"  - {conn_key}: {'Connected' if is_connected else 'Disconnected'}")
 
+        # 新增：预处理 - 等待正在进行的操作完成
+        self._wait_for_pending_operations()
+
         # 使用增强的强制清理和验证
         cleanup_result = ssh_pool.force_cleanup_with_verification()
 
-        # 记录详细的清理结果
+        # 记录详细的清理结果（增强版）
         if cleanup_result['cleanup_successful']:
             if cleanup_result['verification_passed']:
-                self.logger.info(f"✅ Successfully cleaned up {cleanup_result['initial_connections']} SSH connections")
+                retry_info = f" (completed in {cleanup_result['retry_attempts']} attempt{'s' if cleanup_result['retry_attempts'] > 1 else ''})"
+                self.logger.info(f"✅ Successfully cleaned up {cleanup_result['initial_connections']} SSH connections{retry_info}")
             else:
-                self.logger.warning(f"⚠️ Cleanup completed but verification failed - {cleanup_result['final_connections']} connections remain")
+                self.logger.warning(f"⚠️ Cleanup completed but verification failed after {cleanup_result['retry_attempts']} attempts")
+                self.logger.warning(f"   - {cleanup_result['final_connections']} connections remain")
                 if 'remaining_connections' in cleanup_result:
-                    self.logger.warning(f"Remaining connections: {cleanup_result['remaining_connections']}")
+                    self.logger.warning(f"   - Remaining connections: {list(cleanup_result['remaining_connections'].keys())}")
         else:
             self.logger.error(f"❌ SSH connection cleanup failed: {cleanup_result['errors']}")
             raise Exception(f"SSH connection cleanup failed: {cleanup_result['errors']}")
 
         # 将清理结果添加到统计信息中
         self._cleanup_stats['last_ssh_cleanup'] = cleanup_result
+
+        # 增强：收集连接池压力统计
+        self._cleanup_stats['connection_pool_pressure'] = {
+            'max_connections_reached': cleanup_result['initial_connections'] >= 12,  # 80%阈值
+            'retry_attempts': cleanup_result['retry_attempts'],
+            'cleanup_duration': time.time() - self._ssh_cleanup_start_time,
+            'cleanup_successful': cleanup_result['verification_passed']
+        }
+
+    def _wait_for_pending_operations(self):
+        """等待正在进行的SSH操作完成"""
+        self.logger.info("⏳ Waiting for pending SSH operations to complete...")
+        time.sleep(2)  # 给正在进行的操作时间完成
 
     def _cleanup_temporary_files(self):
         """清理临时文件和缓存"""

@@ -344,7 +344,7 @@ class SSHClient:
 class SSHConnectionPool:
     """SSH连接池"""
     
-    def __init__(self, max_connections: int = 10):
+    def __init__(self, max_connections: int = 15):  # 从10增加到15
         self.max_connections = max_connections
         self.connections: Dict[str, SSHClient] = {}
         self.logger = logging.getLogger("ssh.pool")
@@ -425,8 +425,22 @@ class SSHConnectionPool:
         """获取连接信息"""
         return {key: client.is_connected() for key, client in self.connections.items()}
 
+    def _force_disconnect_remaining_connections(self):
+        """强制断开残留连接"""
+        for key, client in list(self.connections.items()):
+            try:
+                if client.client:
+                    transport = client.client.get_transport()
+                    if transport:
+                        transport.close()
+                client.disconnect()
+                del self.connections[key]
+                self.logger.debug(f"Force disconnected: {key}")
+            except Exception as e:
+                self.logger.warning(f"Error force disconnecting {key}: {e}")
+
     def force_cleanup_with_verification(self) -> Dict[str, Any]:
-        """强制清理连接池并验证结果
+        """强制清理连接池并验证结果（增强版）
 
         Returns:
             Dict containing cleanup results and verification status
@@ -436,7 +450,8 @@ class SSHConnectionPool:
             'cleanup_successful': False,
             'final_connections': 0,
             'errors': [],
-            'verification_passed': False
+            'verification_passed': False,
+            'retry_attempts': 0  # 新增：记录重试次数
         }
 
         try:
@@ -446,27 +461,41 @@ class SSHConnectionPool:
             initial_info = self.get_connection_info()
             cleanup_result['initial_connection_details'] = initial_info
 
-            # 执行强制清理
-            self.close_all()
+            # 增强部分：重试机制
+            max_retries = 3
+            for attempt in range(max_retries):
+                cleanup_result['retry_attempts'] = attempt + 1
 
-            # 短暂等待确保清理完成
-            import time
-            time.sleep(0.2)
+                # 执行强制清理
+                self.close_all()
 
-            # 验证清理结果
-            final_count = self.get_connection_count()
-            cleanup_result['final_connections'] = final_count
-            cleanup_result['cleanup_successful'] = True
+                # 增加等待时间（从0.2秒增加到渐进式等待）
+                wait_time = 0.5 + (attempt * 1.0)  # 0.5s, 1.5s, 2.5s
+                import time
+                time.sleep(wait_time)
 
-            # 验证是否真的清理干净
-            if final_count == 0:
-                cleanup_result['verification_passed'] = True
-                self.logger.info("✅ Force cleanup verification passed - connection pool is completely clean")
-            else:
-                cleanup_result['verification_passed'] = False
-                remaining_connections = self.get_connection_info()
-                cleanup_result['remaining_connections'] = remaining_connections
-                self.logger.warning(f"⚠️ Force cleanup verification failed - {final_count} connections remain")
+                # 验证清理结果
+                final_count = self.get_connection_count()
+                cleanup_result['final_connections'] = final_count
+
+                if final_count == 0:
+                    cleanup_result['cleanup_successful'] = True
+                    cleanup_result['verification_passed'] = True
+                    self.logger.info(f"✅ Force cleanup verification passed on attempt {attempt + 1}")
+                    break
+                else:
+                    if attempt < max_retries - 1:
+                        remaining_connections = self.get_connection_info()
+                        self.logger.warning(f"⚠️ Attempt {attempt + 1}: {final_count} connections remain, retrying...")
+                        # 强制断开残留连接
+                        self._force_disconnect_remaining_connections()
+                    else:
+                        # 最后一次尝试失败
+                        cleanup_result['cleanup_successful'] = True  # 清理动作完成了
+                        cleanup_result['verification_passed'] = False  # 但验证失败
+                        remaining_connections = self.get_connection_info()
+                        cleanup_result['remaining_connections'] = remaining_connections
+                        self.logger.error(f"❌ Force cleanup failed after {max_retries} attempts - {final_count} connections remain")
 
         except Exception as e:
             cleanup_result['errors'].append(str(e))
