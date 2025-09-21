@@ -26,3 +26,6 @@ pandas>=1.5.0
 
 # Developer/test helpers (optional)
 # pytest>=7.0.0
+
+# aicp-benchmark
+git+https://github.com/weizj2000/benchmark.git@main#egg=benchmark
