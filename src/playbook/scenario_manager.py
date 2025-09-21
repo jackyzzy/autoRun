@@ -13,26 +13,44 @@ from datetime import datetime
 import json
 
 from ..utils.config_loader import ConfigLoader, ConfigError
+from ..utils.global_config_manager import GlobalConfigManager
 
 
 @dataclass
 class ServiceHealthCheck:
-    """服务健康检查配置"""
-    enabled: bool = True
-    strategy: str = "standard"  # minimal/standard/comprehensive
-    startup_timeout: int = 60
-    startup_grace_period: int = 60
-    check_interval: int = 15
-    max_retries: int = 10
-    checks: List[Dict[str, Any]] = field(default_factory=list)
-    failure_action: str = "retry"  # retry/skip/abort
-    retry_delay: int = 10
-    
+    """服务健康检查配置 - 支持三层配置系统"""
+    # 🆕 所有字段改为Optional，支持三层配置
+    enabled: Optional[bool] = None
+    strategy: Optional[str] = None  # minimal/standard/comprehensive
+    startup_timeout: Optional[int] = None
+    startup_grace_period: Optional[int] = None
+    check_interval: Optional[int] = None
+    max_retries: Optional[int] = None
+    checks: Optional[List[Dict[str, Any]]] = None
+    failure_action: Optional[str] = None  # retry/skip/abort
+    retry_delay: Optional[int] = None
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ServiceHealthCheck':
-        if not data:
-            return cls()
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'ServiceHealthCheck':
+        """从字典创建配置，支持三层配置合并
+
+        Args:
+            data: 场景级配置数据
+            global_defaults: 全局默认配置
+
+        Returns:
+            ServiceHealthCheck: 合并后的配置实例
+        """
+        # 使用GlobalConfigManager进行三层配置合并
+        merged_config = GlobalConfigManager.merge_config(
+            'service_health_check',
+            data or {},
+            global_defaults
+        )
+
+        # 创建实例，只传入dataclass定义的字段
+        instance_data = {k: v for k, v in merged_config.items() if k in cls.__dataclass_fields__}
+        return cls(**instance_data)
 
 
 @dataclass 
@@ -45,27 +63,127 @@ class ServiceDeployment:
     health_check: ServiceHealthCheck = field(default_factory=ServiceHealthCheck)
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ServiceDeployment':
-        health_check_data = data.pop('health_check', {})
-        service = cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-        service.health_check = ServiceHealthCheck.from_dict(health_check_data)
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'ServiceDeployment':
+        data_copy = data.copy()
+        health_check_data = data_copy.pop('health_check', {})
+        service = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
+        service.health_check = ServiceHealthCheck.from_dict(health_check_data, global_defaults)
         return service
 
 
 @dataclass
 class TestExecution:
-    """测试执行配置"""
-    node: str = "local"
-    script: str = "run_test.sh"
-    timeout: int = 1800
-    result_paths: List[str] = field(default_factory=list)
-    wait_for_all_services: bool = True
-    
+    """测试执行配置 - 支持三层配置系统"""
+    # 🆕 所有字段改为Optional，支持三层配置
+    node: Optional[str] = None
+    script: Optional[str] = None
+    timeout: Optional[int] = None
+    result_paths: Optional[List[str]] = None
+    wait_for_all_services: Optional[bool] = None
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'TestExecution':
-        if not data:
-            return cls()
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'TestExecution':
+        """从字典创建配置，支持三层配置合并
+
+        Args:
+            data: 场景级配置数据
+            global_defaults: 全局默认配置
+
+        Returns:
+            TestExecution: 合并后的配置实例
+        """
+        # 使用GlobalConfigManager进行三层配置合并
+        merged_config = GlobalConfigManager.merge_config(
+            'test_execution',
+            data or {},
+            global_defaults
+        )
+
+        # 创建实例，只传入dataclass定义的字段
+        instance_data = {k: v for k, v in merged_config.items() if k in cls.__dataclass_fields__}
+        return cls(**instance_data)
+
+
+@dataclass
+class ConcurrentExecutionConfig:
+    """并发执行配置 - 支持三层配置系统"""
+    max_concurrent_services: Optional[int] = None
+    deployment_timeout: Optional[int] = None
+    health_check_timeout: Optional[int] = None
+    max_concurrent_health_checks: Optional[int] = None
+    max_workers_health_check: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'ConcurrentExecutionConfig':
+        """从字典创建配置，支持三层配置合并"""
+        merged_config = GlobalConfigManager.merge_config(
+            'concurrent_execution',
+            data or {},
+            global_defaults
+        )
+        instance_data = {k: v for k, v in merged_config.items() if k in cls.__dataclass_fields__}
+        return cls(**instance_data)
+
+
+@dataclass
+class FileOperationsConfig:
+    """文件操作配置 - 支持三层配置系统"""
+    upload_retries: Optional[int] = None
+    verification_timeout: Optional[int] = None
+    cleanup_timeout: Optional[int] = None
+    hash_check_timeout: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'FileOperationsConfig':
+        """从字典创建配置，支持三层配置合并"""
+        merged_config = GlobalConfigManager.merge_config(
+            'file_operations',
+            data or {},
+            global_defaults
+        )
+        instance_data = {k: v for k, v in merged_config.items() if k in cls.__dataclass_fields__}
+        return cls(**instance_data)
+
+
+@dataclass
+class ProgressDisplayConfig:
+    """进度显示配置 - 支持三层配置系统"""
+    countdown_interval_long: Optional[int] = None
+    countdown_interval_short: Optional[int] = None
+    thread_join_timeout: Optional[float] = None
+    retry_display_delay: Optional[float] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'ProgressDisplayConfig':
+        """从字典创建配置，支持三层配置合并"""
+        merged_config = GlobalConfigManager.merge_config(
+            'progress_display',
+            data or {},
+            global_defaults
+        )
+        instance_data = {k: v for k, v in merged_config.items() if k in cls.__dataclass_fields__}
+        return cls(**instance_data)
+
+
+@dataclass
+class SystemResourcesConfig:
+    """系统资源配置 - 支持三层配置系统"""
+    max_ssh_workers: Optional[int] = None
+    max_file_workers: Optional[int] = None
+    connection_timeout: Optional[int] = None
+    command_timeout: Optional[int] = None
+    max_failure_threshold: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'SystemResourcesConfig':
+        """从字典创建配置，支持三层配置合并"""
+        merged_config = GlobalConfigManager.merge_config(
+            'system_resources',
+            data or {},
+            global_defaults
+        )
+        instance_data = {k: v for k, v in merged_config.items() if k in cls.__dataclass_fields__}
+        return cls(**instance_data)
 
 
 @dataclass
@@ -75,18 +193,18 @@ class DeploymentConfig:
     test_execution: TestExecution = field(default_factory=TestExecution)
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'DeploymentConfig':
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'DeploymentConfig':
         if not data:
             return cls()
-        
-        # 解析services
+
+        # 解析services，传递global_defaults
         services = []
         for service_data in data.get('services', []):
-            services.append(ServiceDeployment.from_dict(service_data))
-        
-        # 解析test_execution
-        test_execution = TestExecution.from_dict(data.get('test_execution', {}))
-        
+            services.append(ServiceDeployment.from_dict(service_data, global_defaults))
+
+        # 解析test_execution，传递global_defaults
+        test_execution = TestExecution.from_dict(data.get('test_execution', {}), global_defaults)
+
         return cls(services=services, test_execution=test_execution)
 
 
@@ -106,7 +224,16 @@ class ScenarioMetadata:
     test_execution: TestExecution = field(default_factory=TestExecution)
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ScenarioMetadata':
+    def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'ScenarioMetadata':
+        """从字典创建场景元数据，支持三层配置系统
+
+        Args:
+            data: 场景元数据字典
+            global_defaults: 全局默认配置
+
+        Returns:
+            ScenarioMetadata: 场景元数据实例
+        """
         # 支持新旧格式的兼容性处理
         data_copy = data.copy()
 
@@ -116,21 +243,25 @@ class ScenarioMetadata:
             test_execution_data = data_copy.pop('test_execution', {})
 
             metadata = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
-            metadata.services = [ServiceDeployment.from_dict(s) for s in services_data]
-            metadata.test_execution = TestExecution.from_dict(test_execution_data)
+            # 🆕 传递global_defaults到子配置
+            metadata.services = [ServiceDeployment.from_dict(s, global_defaults) for s in services_data]
+            metadata.test_execution = TestExecution.from_dict(test_execution_data, global_defaults)
 
         # 旧格式：通过deployment字段
         elif 'deployment' in data_copy:
             deployment_data = data_copy.pop('deployment', {})
             metadata = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
 
-            deployment_config = DeploymentConfig.from_dict(deployment_data)
+            # 🆕 传递global_defaults到DeploymentConfig
+            deployment_config = DeploymentConfig.from_dict(deployment_data, global_defaults)
             metadata.services = deployment_config.services
             metadata.test_execution = deployment_config.test_execution
 
-        # 默认情况
+        # 默认情况：使用默认值和全局配置
         else:
             metadata = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
+            # 🆕 使用全局配置创建默认的test_execution
+            metadata.test_execution = TestExecution.from_dict({}, global_defaults)
 
         return metadata
     
@@ -266,25 +397,29 @@ class ScenarioManager:
     def __init__(self, config_file: str = None, scenarios_root: str = None):
         self.logger = logging.getLogger("playbook.scenario_manager")
         self.config_loader = ConfigLoader()
-        
+
         # 配置
         self.config_file = config_file
         self.scenarios_root = scenarios_root or "config/scenarios"
-        
+
+        # 🆕 核心改动：引入全局配置管理器
+        config_dir = Path(config_file).parent if config_file else "config"
+        self.global_config_manager = GlobalConfigManager(config_dir=str(config_dir))
+
         # 场景数据
         self.scenarios: Dict[str, Scenario] = {}
         self.execution_order: List[str] = []
         self.config: Dict[str, Any] = {}
-        
+
         # 执行配置
         self.execution_mode = ScenarioDiscoveryMode.AUTO
         self.filters = {}
         self.inter_scenario_config = {}
         self.execution_config = {}  # 新增：并发执行配置
-        
+
         if config_file and Path(config_file).exists():
             self.load_config()
-        
+
         self.discover_scenarios()
     
     def load_config(self):
@@ -359,7 +494,11 @@ class ScenarioManager:
             if metadata_file:
                 try:
                     metadata_config = self.config_loader.load_yaml(str(metadata_file))
-                    scenario.metadata = ScenarioMetadata.from_dict(metadata_config)
+                    # 🆕 关键修正：传入全局配置
+                    scenario.metadata = ScenarioMetadata.from_dict(
+                        metadata_config,
+                        self.global_config_manager.global_defaults
+                    )
                     scenario.description = scenario.metadata.description
                 except Exception as e:
                     self.logger.warning(f"Failed to load metadata for {scenario_name}: {e}")
@@ -661,12 +800,27 @@ class ScenarioManager:
         """备份配置文件"""
         if not self.config_file or not Path(self.config_file).exists():
             return ""
-        
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = f"{self.config_file}.backup.{timestamp}"
-        
+
         import shutil
         shutil.copy2(self.config_file, backup_file)
-        
+
         self.logger.info(f"Backed up configuration to {backup_file}")
         return backup_file
+
+    def get_merged_concurrent_config(self, scenario: 'Scenario') -> Dict[str, Any]:
+        """获取合并后的并发配置 - 供scenario_runner使用"""
+        scenario_config = {}
+        if scenario.metadata and hasattr(scenario.metadata, 'concurrent_execution'):
+            # 将在后续阶段实现这个属性
+            scenario_config = getattr(scenario.metadata.concurrent_execution, '__dict__', {})
+
+        # 临时：也考虑从execution_config获取（兼容现有配置）
+        execution_config = self.execution_config.get('concurrent_deployment', {})
+        for key, value in execution_config.items():
+            if key not in scenario_config:
+                scenario_config[key] = value
+
+        return self.global_config_manager.get_merged_config('concurrent_execution', scenario_config)

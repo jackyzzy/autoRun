@@ -7,10 +7,19 @@ import paramiko
 import socket
 import logging
 import hashlib
+import threading
 from typing import Dict, List, Optional, Tuple, Any
 from contextlib import contextmanager
 import time
 import os
+
+# 尝试导入 SCPClient（可选依赖）
+try:
+    from scp import SCPClient
+    _HAS_SCP = True
+except Exception:
+    SCPClient = None
+    _HAS_SCP = False
 
 
 class SSHConnectionError(Exception):
@@ -200,7 +209,112 @@ class SSHClient:
         except Exception as cleanup_error:
             self.logger.warning(f"Failed to cleanup corrupted remote file {remote_path}: {cleanup_error}")
 
-    def upload_file(self, local_path: str, remote_path: str) -> bool:
+    def _sftp_put_with_timeout(self, local_path: str, remote_path: str, timeout: int = 120) -> None:
+        """使用线程包装sftp.put以实现超时控制。
+
+        如果在timeout秒内未完成，则尝试关闭transport以中断阻塞的sftp操作。
+        该函数在失败时会抛出异常。
+        """
+        exception_holder = {}
+
+        def target():
+            try:
+                # sftp.put在网络问题或对端无响应时可能阻塞
+                self.sftp.put(local_path, remote_path)
+            except Exception as e:
+                exception_holder['exc'] = e
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(timeout)
+
+        if thread.is_alive():
+            # 超时：尝试通过关闭transport来中断阻塞的sftp调用
+            self.logger.error(f"sftp.put timed out after {timeout}s, attempting to abort by closing transport")
+            try:
+                if self.client:
+                    transport = self.client.get_transport()
+                    if transport:
+                        transport.close()
+                        self.logger.debug("Closed transport to abort stalled sftp.put")
+            except Exception as close_err:
+                self.logger.warning(f"Error while closing transport after sftp.put timeout: {close_err}")
+
+            # 等待线程短暂退出
+            thread.join(2)
+
+            # 清理sftp引用，因为transport已关闭
+            try:
+                if self.sftp:
+                    self.sftp.close()
+            except Exception:
+                pass
+            self.sftp = None
+
+            raise SSHExecutionError(f"sftp.put timed out after {timeout} seconds and transport was closed")
+
+        # 线程已结束，检查是否捕获到异常
+        if 'exc' in exception_holder:
+            raise exception_holder['exc']
+
+    def _scp_put_with_timeout(self, local_path: str, remote_path: str, timeout: int = 120) -> None:
+        """使用 SCPClient 上传文件并提供超时保护。
+
+        要求安装 `scp` 包（pip install scp）。如果未安装，会抛出 SSHExecutionError 指示用户安装。
+        """
+        if not _HAS_SCP or SCPClient is None:
+            raise SSHExecutionError("scp upload requires the 'scp' package. Install with: pip install scp")
+
+        exception_holder = {}
+
+        def target():
+            scp = None
+            try:
+                # 通过 paramiko transport 创建 SCPClient
+                transport = self.client.get_transport()
+                scp = SCPClient(transport)
+                # remote_path 可能需要指定目录权限，SCPClient.put 支持远程路径
+                scp.put(local_path, remote_path)
+            except Exception as e:
+                exception_holder['exc'] = e
+            finally:
+                try:
+                    if scp:
+                        scp.close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(timeout)
+
+        if thread.is_alive():
+            self.logger.error(f"scp.put timed out after {timeout}s, attempting to abort by closing transport")
+            try:
+                if self.client:
+                    transport = self.client.get_transport()
+                    if transport:
+                        transport.close()
+                        self.logger.debug("Closed transport to abort stalled scp.put")
+            except Exception as close_err:
+                self.logger.warning(f"Error while closing transport after scp.put timeout: {close_err}")
+
+            thread.join(2)
+
+            # 清理sftp引用（scp使用相同transport）
+            try:
+                if self.sftp:
+                    self.sftp.close()
+            except Exception:
+                pass
+            self.sftp = None
+
+            raise SSHExecutionError(f"scp.put timed out after {timeout} seconds and transport was closed")
+
+        if 'exc' in exception_holder:
+            raise exception_holder['exc']
+
+    def upload_file(self, local_path: str, remote_path: str, method: str = 'scp', timeout: int = 120) -> bool:
         """上传文件到远程服务器"""
         if not self.is_connected():
             self.connect()
@@ -214,8 +328,29 @@ class SSHClient:
             if remote_dir:
                 self.execute_command(f"mkdir -p {remote_dir}", check_exit_code=False)
             
-            # 上传文件
-            self.sftp.put(local_path, remote_path)
+            self.logger.info(f"Uploading {local_path} to {remote_path} start ...")
+            # 上传文件：支持 'sftp'（默认）和 'scp'
+            try:
+                if method.lower() == 'sftp':
+                    # 使用带超时的sftp put包装器，避免长时间阻塞
+                    self._sftp_put_with_timeout(local_path, remote_path, timeout=timeout)
+                elif method.lower() == 'scp':
+                    # 使用scp上传（需要安装 python-scp 包）
+                    self._scp_put_with_timeout(local_path, remote_path, timeout=timeout)
+                else:
+                    raise SSHExecutionError(f"Unknown upload method: {method}")
+            except Exception as put_err:
+                # 如果发生超时或底层错误，确保远端残留文件被移除并重新抛出为SSHExecutionError
+                self.logger.error(f"file upload failed ({method}): {put_err}")
+                try:
+                    self._cleanup_failed_upload(remote_path)
+                except Exception:
+                    pass
+                # 如果put_err不是SSHExecutionError，统一包装
+                if isinstance(put_err, SSHExecutionError):
+                    raise
+                else:
+                    raise SSHExecutionError(f"Failed during {method} upload: {put_err}")
 
             # 分层验证上传结果
             try:

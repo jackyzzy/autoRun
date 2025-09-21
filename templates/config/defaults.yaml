@@ -1,0 +1,154 @@
+# 全局默认配置文件 - 三层配置系统的中间层
+# 配置优先级：场景配置 > 全局配置 > 系统默认值
+#
+# 使用说明：
+# 1. 复制此文件到 config/defaults.yaml
+# 2. 根据你的环境调整配置值
+# 3. 场景特定的配置可以在各场景的 metadata.yaml 中覆盖
+#
+# 注意：所有配置项都是可选的，未配置的项目将使用系统内置默认值
+
+# ================================
+# 服务健康检查配置
+# ================================
+service_health_check:
+  # 是否启用健康检查
+  enabled: true
+
+  # 健康检查策略: standard | quick | thorough
+  strategy: "standard"
+
+  # 服务启动超时时间（秒）- 服务从启动到就绪的最大等待时间
+  startup_timeout: 240
+
+  # 启动宽限期（秒）- 在开始健康检查前等待的时间
+  startup_grace_period: 120
+
+  # 健康检查间隔（秒）- 每次检查之间的等待时间
+  check_interval: 10
+
+  # 最大重试次数 - 健康检查失败后的重试次数
+  max_retries: 5
+
+  # 重试延迟（秒）- 重试之间的等待时间
+  retry_delay: 10
+
+  # 失败处理策略: retry | skip | abort
+  failure_action: "retry"
+
+# ================================
+# 测试执行配置
+# ================================
+test_execution:
+  # 执行节点: local | remote | auto
+  node: "local"
+
+  # 测试脚本文件名
+  script: "run_test.sh"
+
+  # 测试执行超时时间（秒）
+  timeout: 1800  # 30分钟，适合中等复杂度测试
+
+  # 是否等待所有服务就绪后再执行测试
+  wait_for_all_services: true
+
+# ================================
+# 并发执行配置
+# ================================
+concurrent_execution:
+  # 最大并发服务数 - 同时部署的服务数量限制
+  max_concurrent_services: 3
+
+  # 部署超时时间（秒）- 单个服务的最大部署时间
+  deployment_timeout: 300  # 5分钟
+
+  # 健康检查总超时时间（秒）
+  health_check_timeout: 180  # 3分钟
+
+  # 最大并发健康检查数
+  max_concurrent_health_checks: 6
+
+  # 健康检查工作线程数
+  max_workers_health_check: 4
+
+# ================================
+# 文件操作配置
+# ================================
+file_operations:
+  # 文件上传重试次数
+  upload_retries: 3
+
+  # 文件验证超时时间（秒）
+  verification_timeout: 15
+
+  # 清理操作超时时间（秒）
+  cleanup_timeout: 15
+
+  # 文件哈希检查超时时间（秒）
+  hash_check_timeout: 15
+
+# ================================
+# 进度显示配置
+# ================================
+progress_display:
+  # 长倒计时间隔（秒）- 当剩余时间 >= 30秒时使用
+  countdown_interval_long: 5
+
+  # 短倒计时间隔（秒）- 当剩余时间 < 30秒时使用
+  countdown_interval_short: 2
+
+  # 线程等待超时（秒）
+  thread_join_timeout: 1
+
+  # 重试显示延迟（秒）
+  retry_display_delay: 1
+
+# ================================
+# 系统资源配置
+# ================================
+system_resources:
+  # 最大SSH工作线程数
+  max_ssh_workers: 6
+
+  # 最大文件操作工作线程数
+  max_file_workers: 4
+
+  # SSH连接超时时间（秒）
+  connection_timeout: 20
+
+  # 命令执行超时时间（秒）
+  command_timeout: 180  # 3分钟
+
+  # 最大失败阈值
+  max_failure_threshold: 2
+
+# ================================
+# 环境特定配置示例
+# ================================
+# 以下配置可以根据不同环境进行调整：
+
+# 开发环境建议配置：
+# service_health_check:
+#   startup_timeout: 120     # 开发环境启动较快
+#   max_retries: 3           # 开发环境容错性较低
+# concurrent_execution:
+#   max_concurrent_services: 2  # 开发机器资源有限
+# test_execution:
+#   timeout: 900             # 开发测试相对简单
+
+# 生产环境建议配置：
+# service_health_check:
+#   startup_timeout: 300     # 生产环境可能需要更多时间
+#   max_retries: 8           # 生产环境需要更高容错性
+# concurrent_execution:
+#   max_concurrent_services: 5  # 生产服务器资源充足
+# test_execution:
+#   timeout: 3600            # 生产测试更全面
+
+# CI/CD环境建议配置：
+# service_health_check:
+#   startup_timeout: 180     # CI环境资源相对稳定
+#   strategy: "quick"        # CI环境追求速度
+# progress_display:
+#   countdown_interval_long: 10   # CI日志不需要频繁更新
+#   countdown_interval_short: 5
