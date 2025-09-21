@@ -335,6 +335,7 @@ class TestScriptExecutor:
                 f"cd {node.work_dir}",
                 f"export SCENARIO_NAME='{scenario.name}'",
                 f"export SCENARIO_PATH='{node.work_dir}'",
+                f"export SCENARIO_RESULT_PATH='{node.results_path}'",
                 f"bash {remote_script_path}"
             ]
             

@@ -33,6 +33,7 @@ test_playbook/
 │   ├── config/             # 配置文件模板
 │   │   ├── nodes.yaml      # 脱敏的节点配置模板
 │   │   ├── scenarios.yaml  # 脱敏的场景配置模板
+│   │   ├── defaults.yaml   # 全局默认配置模板
 │   │   └── scenarios/      # 场景模板目录
 │   └── README.md           # 模板使用说明
 ├── src/                     # 源代码
@@ -46,11 +47,13 @@ test_playbook/
 │   │   ├── health_check_manager.py # 健康检查管理器
 │   │   ├── benchmark_runner.py # 基准测试执行
 │   │   ├── result_collector.py # 结果收集
+│   │   ├── test_script_executor.py # 测试脚本执行器
 │   │   └── exceptions.py   # 异常定义
 │   └── utils/              # 工具模块
-│       ├── ssh_client.py   # SSH连接工具（增强版）
+│       ├── ssh_client.py   # SSH连接工具（SCP传输优化）
 │       ├── config_loader.py # 配置加载器
 │       ├── config_validator.py # 配置验证器
+│       ├── global_config_manager.py # 全局配置管理器
 │       ├── logger.py       # 日志工具
 │       ├── common.py       # 公共工具函数
 │       └── docker_compose_adapter.py # Docker Compose版本适配
@@ -65,6 +68,13 @@ test_playbook/
 ```bash
 pip install -r requirements.txt
 ```
+
+**主要依赖包说明：**
+- `paramiko`: SSH连接和文件传输
+- `scp`: SCP文件传输优化（相比SFTP更高效）
+- `click`: 命令行界面
+- `rich`: 美化输出和进度显示
+- `PyYAML`: 配置文件解析
 
 ### 2. 配置文件设置
 
@@ -114,7 +124,58 @@ execution:
       description: "基线性能测试"
 ```
 
-### 3. 设置环境变量
+### 3. 三层配置系统
+
+Playbook 采用三层配置系统，配置优先级为：**场景配置 > 全局配置 > 系统默认值**
+
+#### 配置层级说明
+
+1. **场景配置**（最高优先级）
+   - 位置：`config/scenarios/{scenario_name}/metadata.yaml`
+   - 作用：特定场景的专用配置
+
+2. **全局配置**（中等优先级）
+   - 位置：`config/defaults.yaml`
+   - 作用：项目级别的默认配置
+
+3. **系统默认值**（最低优先级）
+   - 位置：代码内置
+   - 作用：保证系统基本运行的后备配置
+
+#### 配置全局默认值
+
+复制并编辑全局配置文件：
+
+```bash
+# 复制全局配置模板
+cp templates/config/defaults.yaml config/
+
+# 编辑全局配置
+vi config/defaults.yaml
+```
+
+**全局配置示例：**
+```yaml
+# 服务健康检查配置
+service_health_check:
+  enabled: true
+  strategy: "standard"  # quick | standard | thorough
+  startup_timeout: 200  # 服务启动超时（秒）
+  max_retries: 4        # 最大重试次数
+
+# 测试执行配置
+test_execution:
+  timeout: 2400         # 测试超时时间（秒）
+  node: "local"         # 执行节点: local | remote | auto
+
+# 并发执行配置
+concurrent_execution:
+  max_concurrent_services: 4        # 最大并发服务数
+  deployment_timeout: 450           # 部署超时（秒）
+  max_concurrent_health_checks: 7   # 最大并发健康检查数
+```
+
+### 4. 设置环境变量
 
 ```bash
 export NODE1_PASSWORD="your_actual_password"
@@ -225,6 +286,38 @@ services:
     "gpu_num": 4
   }
 }
+```
+
+### 测试脚本环境变量
+
+测试脚本执行时，系统会自动设置以下环境变量：
+
+| 环境变量 | 说明 | 示例值 |
+|---------|------|--------|
+| `SCENARIO_NAME` | 当前执行的场景名称 | `baseline_test` |
+| `SCENARIO_PATH` | 场景工作目录路径 | `/opt/inference` |
+| `SCENARIO_RESULT_PATH` | 测试结果存储路径 | `/opt/benchmark/results` |
+
+**在测试脚本中使用环境变量：**
+
+```bash
+#!/bin/bash
+# run_test.sh
+
+# 使用系统提供的环境变量
+echo "执行场景: $SCENARIO_NAME"
+echo "工作目录: $SCENARIO_PATH"
+echo "结果路径: $SCENARIO_RESULT_PATH"
+
+# 确保结果目录存在
+mkdir -p "$SCENARIO_RESULT_PATH"
+
+# 运行测试并将结果保存到指定路径
+docker run --rm \
+  -v "$SCENARIO_RESULT_PATH:/benchmark/results" \
+  your-test-image \
+  --scenario "$SCENARIO_NAME" \
+  --output-dir "/benchmark/results"
 ```
 
 ## 📊 测试结果
@@ -481,12 +574,41 @@ max_concurrent_health_checks: 3-5
 
 ## 📋 最佳实践
 
-1. **场景命名**: 使用数字前缀控制执行顺序（如 `001_baseline`）
-2. **配置管理**: 使用环境变量管理敏感信息
-3. **资源规划**: 在metadata.yaml中明确资源需求
-4. **错误处理**: 启用continue_on_failure进行批量测试
-5. **结果管理**: 定期清理旧的测试结果，避免磁盘空间不足
-6. **监控日志**: 使用详细日志模式进行问题排查
+### 1. 场景管理
+- **命名规范**: 使用数字前缀控制执行顺序（如 `001_baseline`）
+- **目录结构**: 保持场景目录结构的一致性
+- **资源规划**: 在metadata.yaml中明确资源需求
+
+### 2. 配置管理
+- **环境变量**: 使用环境变量管理敏感信息
+- **三层配置**: 充分利用三层配置系统的优势
+  - 场景特定配置放在 `metadata.yaml`
+  - 项目级配置放在 `config/defaults.yaml`
+  - 让系统默认值处理基础配置
+- **配置验证**: 使用 `./playbook.py validate` 验证配置文件
+
+### 3. 测试脚本编写
+- **环境变量使用**: 优先使用系统提供的环境变量
+  ```bash
+  # 推荐：使用环境变量
+  mkdir -p "$SCENARIO_RESULT_PATH"
+
+  # 不推荐：硬编码路径
+  mkdir -p "/opt/benchmark/results"
+  ```
+- **错误处理**: 在脚本开始添加 `set -e` 确保错误时停止
+- **日志记录**: 使用有意义的日志输出，便于调试
+
+### 4. 性能优化
+- **并发配置**: 根据硬件资源调整 `max_concurrent_services`
+- **传输方式**: 利用SCP传输的性能优势（自动启用）
+- **超时设置**: 根据实际测试复杂度调整超时时间
+
+### 5. 运维管理
+- **错误处理**: 启用continue_on_failure进行批量测试
+- **结果管理**: 定期清理旧的测试结果，避免磁盘空间不足
+- **监控日志**: 使用详细日志模式进行问题排查
+- **健康检查**: 定期运行 `./playbook.py health` 检查系统状态
 
 ## 🐛 故障排查
 

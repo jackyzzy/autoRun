@@ -10,22 +10,25 @@ echo "Starting template scenario test..."
 # 测试配置 - 根据场景需求修改
 BASE_URL="http://10.112.0.201:18008"
 MODEL="/data/your-model-path"
-RESULTS_PATH="/home/zjwei/benchmark/results"
 
-# 场景特定参数
-SCENARIO_NAME="template_scenario"
+# 场景特定参数（可以从环境变量获取，也可以硬编码）
 NUM_PROMPTS=1000
 MAX_CONCURRENCY=20
 
+# 使用系统提供的环境变量
+echo "🚀 开始执行场景: $SCENARIO_NAME"
+echo "📁 工作目录: $SCENARIO_PATH"
+echo "💾 结果路径: $SCENARIO_RESULT_PATH"
+
 # 确保结果目录存在
-mkdir -p "${RESULTS_PATH}"
+mkdir -p "${SCENARIO_RESULT_PATH}"
 
 # 运行AICP基准测试
 docker run -it --rm \
   --network host \
   --ipc=host \
   --privileged=true \
-  -v "${RESULTS_PATH}:/benchmark/data/results" \
+  -v "${SCENARIO_RESULT_PATH}:/benchmark/data/results" \
   sangfor.com/aicp-benchmark:v0.0.6 \
   --base-url "${BASE_URL}" \
   --model "${MODEL}" \
@@ -40,13 +43,13 @@ docker run -it --rm \
   --enable-same-prompt \
   --metadata scenario="${SCENARIO_NAME}" arch=x86 gpu="NVIDIA H200" gpu_num=4 replicas=2 backend=sglang410 config_type=template
 
-echo "Template scenario test completed!"
-echo "Results saved to: ${RESULTS_PATH}"
+echo "✅ Template scenario test completed!"
+echo "💾 Results saved to: ${SCENARIO_RESULT_PATH}"
 
 # 检查测试结果文件
-if [ -d "${RESULTS_PATH}" ]; then
-    echo "Result files:"
-    find "${RESULTS_PATH}" -name "*.json" -o -name "*.csv" -o -name "*.log" | head -10
+if [ -d "${SCENARIO_RESULT_PATH}" ]; then
+    echo "📋 Result files:"
+    find "${SCENARIO_RESULT_PATH}" -name "*.json" -o -name "*.csv" -o -name "*.log" | head -10
 else
-    echo "Warning: Results directory not found"
+    echo "⚠️  Warning: Results directory not found"
 fi
