@@ -1,0 +1,9 @@
+config/
+templates/
+Dockerfile
+.idea/
+.git/
+.gitignore
+.DS_Store
+.vscode/
+__pycache__/
