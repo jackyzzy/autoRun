@@ -1,0 +1,200 @@
+# 🐳 复杂依赖关系场景的Docker Compose配置示例
+# 注意：这个文件演示了服务间的依赖关系如何在Playbook中处理
+# Playbook会自动根据metadata.yml中的depends_on字段确定部署批次
+
+version: '3.8'
+
+services:
+  # 📊 Batch 1: 基础服务层
+  redis:
+    image: "redis:7-alpine"
+    container_name: "demo_redis"
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mysql:
+    image: "mysql:8.0"
+    container_name: "demo_mysql"
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: "demo_password"
+      MYSQL_DATABASE: "demo_db"
+      MYSQL_USER: "demo_user"
+      MYSQL_PASSWORD: "demo_pass"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  config-service:
+    image: "nginx:alpine"
+    container_name: "demo_config_service"
+    ports:
+      - "8090:80"
+    volumes:
+      - ./config:/usr/share/nginx/html:ro
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # 📊 Batch 2: 应用服务层 (依赖Batch 1)
+  # 注意：Docker Compose的depends_on只控制启动顺序，不等待服务就绪
+  # Playbook的depends_on会等待依赖服务完全就绪（包括健康检查）
+  user-service:
+    image: "demo/user-service:latest"
+    container_name: "demo_user_service"
+    ports:
+      - "8001:8000"
+    environment:
+      REDIS_URL: "redis://redis:6379"
+      DATABASE_URL: "mysql://demo_user:demo_pass@mysql:3306/demo_db"
+      CONFIG_SERVICE_URL: "http://config-service:80"
+    # Docker Compose的depends_on（启动顺序依赖）
+    depends_on:
+      - redis
+      - mysql
+      - config-service
+    # Playbook的depends_on在metadata.yml中定义（就绪状态依赖）
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  order-service:
+    image: "demo/order-service:latest"
+    container_name: "demo_order_service"
+    ports:
+      - "8002:8000"
+    environment:
+      REDIS_URL: "redis://redis:6379"
+      DATABASE_URL: "mysql://demo_user:demo_pass@mysql:3306/demo_db"
+      USER_SERVICE_URL: "http://user-service:8000"
+    depends_on:
+      - redis
+      - mysql
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  # 📊 Batch 3: 网关层 (依赖Batch 1和2)
+  api-gateway:
+    image: "demo/api-gateway:latest"
+    container_name: "demo_api_gateway"
+    ports:
+      - "8080:8080"
+    environment:
+      USER_SERVICE_URL: "http://user-service:8000"
+      ORDER_SERVICE_URL: "http://order-service:8000"
+      CONFIG_SERVICE_URL: "http://config-service:80"
+    depends_on:
+      - user-service
+      - order-service
+      - config-service
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 60s
+    restart: unless-stopped
+
+  # 📊 Batch 4: 前端层 (依赖Batch 3)
+  web-frontend:
+    image: "demo/web-frontend:latest"
+    container_name: "demo_web_frontend"
+    ports:
+      - "3000:3000"
+    environment:
+      API_GATEWAY_URL: "http://api-gateway:8080"
+    depends_on:
+      - api-gateway
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  mobile-app-backend:
+    image: "demo/mobile-backend:latest"
+    container_name: "demo_mobile_backend"
+    ports:
+      - "8003:8000"
+    environment:
+      API_GATEWAY_URL: "http://api-gateway:8080"
+    depends_on:
+      - api-gateway
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+# 💾 数据持久化
+volumes:
+  redis_data:
+    driver: local
+  mysql_data:
+    driver: local
+
+# 🌐 网络配置
+networks:
+  default:
+    name: demo_network
+    driver: bridge
+
+# 📝 重要说明：
+#
+# 🔄 依赖关系的两个层面：
+# 1. Docker Compose depends_on: 控制容器启动顺序，但不等待服务就绪
+# 2. Playbook depends_on: 等待服务完全就绪（健康检查通过）后才启动依赖方
+#
+# 🚀 并发部署的优势：
+# - 传统方式：逐个启动服务，总时间 = 所有服务启动时间之和
+# - 并发方式：批次内并发，总时间 = 各批次最大启动时间之和
+#
+# 🎯 最佳实践：
+# 1. 合理设计服务依赖关系，避免过深的依赖链
+# 2. 基础服务（redis、mysql）尽量无依赖，可以并发启动
+# 3. 应用服务层可以依赖基础服务，在同一批次内并发
+# 4. 网关和前端服务依赖应用服务，形成清晰的分层架构
