@@ -190,9 +190,6 @@ id_rsa*
 *.pub
 
 # Docker
-.dockerignore
-Dockerfile*
-docker-compose*.yml
 !scenarios/*/docker-compose*.yml
 
 # Backup files
