@@ -114,8 +114,8 @@ class TestScriptExecutor:
         """执行脚本并实时显示输出"""
         self.logger.info(f"🚀 Starting test execution: {' '.join(cmd)}")
 
-        # 启动进度指示器
-        self.spinner.start(f"Executing test script...")
+        # Use logger for progress messages instead of StatusSpinner
+        self.logger.info("Executing test script...")
 
         try:
             # 启动进程
@@ -161,7 +161,7 @@ class TestScriptExecutor:
 
             # 定期更新进度消息
             last_update = time.time()
-            update_interval = 10  # 每10秒更新一次
+            update_interval = 300  # 每300秒更新一次
 
             try:
                 while process.poll() is None:
@@ -177,9 +177,9 @@ class TestScriptExecutor:
                             process.kill()
                         break
 
-                    # 定期更新进度消息
+                    # 定期更新进度消息（使用 logger 替代 spinner）
                     if current_time - last_update >= update_interval:
-                        self.spinner.update_message(f"Test running for {elapsed:.0f}s...")
+                        self.logger.info(f"Test running for {elapsed:.0f}s...")
                         last_update = current_time
 
                     time.sleep(1)
@@ -197,8 +197,8 @@ class TestScriptExecutor:
             exit_code = process.returncode
             duration = time.time() - start_time
 
-            # 停止进度指示器
-            self.spinner.stop()
+            # Progress logging finished
+            self.logger.info("Test execution finished")
 
             # 合并输出
             stdout = '\n'.join(stdout_lines)
@@ -227,7 +227,8 @@ class TestScriptExecutor:
             return result
 
         except Exception as e:
-            self.spinner.stop("❌ Test execution failed")
+            # Log the failure and return a failed result
+            self.logger.error(f"❌ Test execution failed: {e}")
             duration = time.time() - start_time
 
             return TestExecutionResult(
