@@ -542,6 +542,8 @@ class ScenarioRunner:
                     max_concurrent_services, retry_strategy, deployment_timeout
                 )
             )
+            # TODO: remove this line
+            self.logger.info(f"33333:Completed all deployment batches")
 
             # 转换结果格式
             service_results = {

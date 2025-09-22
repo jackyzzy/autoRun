@@ -497,6 +497,8 @@ class ConcurrentServiceDeployer:
             # 记录批次结果
             logger.log_batch_summary(i, batch_results, len(batches))
             all_results.update(batch_results)
+            # TODO remove this line
+            self.logger.info(f"111111:Completed batch {i}/{len(batches)}")
 
             # 检查批次失败
             failed_services = [name for name, result in batch_results.items() if result.is_failed]
@@ -513,6 +515,8 @@ class ConcurrentServiceDeployer:
                         all_results[service_node.service.name] = result
 
                 raise RuntimeError(f"Service deployment failed: {failed_services}")
+            # TODO remove this line
+            self.logger.info(f"222222:Completed batch {i}/{len(batches)}")
 
         return all_results
 
