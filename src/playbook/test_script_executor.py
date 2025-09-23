@@ -87,6 +87,10 @@ class TestScriptExecutor:
             env = os.environ.copy()
             env['SCENARIO_NAME'] = scenario.name
             env['SCENARIO_PATH'] = str(work_dir)
+            if test_config.result_paths:   # 设置结果路径环境变量（使用平台路径分隔符）
+                env['SCENARIO_RESULT_PATH'] = os.pathsep.join(map(str, test_config.result_paths))
+            else:
+                env['SCENARIO_RESULT_PATH'] = ''
             
             # 执行脚本并实时显示输出
             result = self._execute_with_realtime_output(
