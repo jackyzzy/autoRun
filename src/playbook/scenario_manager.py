@@ -80,6 +80,8 @@ class TestExecution:
     timeout: Optional[int] = None
     result_paths: Optional[List[str]] = None
     wait_for_all_services: Optional[bool] = None
+    # 🆕 新增结果收集模式配置
+    collection_mode: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'TestExecution':

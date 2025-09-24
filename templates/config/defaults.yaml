@@ -52,6 +52,9 @@ test_execution:
   # 是否等待所有服务就绪后再执行测试
   wait_for_all_services: true
 
+  # 测试结果收集模式
+  collection_mode: "standard"  # 可选值: basic | standard | detailed
+
 # ================================
 # 并发执行配置
 # ================================

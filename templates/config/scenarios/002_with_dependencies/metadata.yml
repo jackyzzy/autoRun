@@ -181,3 +181,4 @@ deployment:
       - "/tmp/complex_test_results"
       - "/var/log/integration_test"
     wait_for_all_services: true
+    collection_mode: "standard"  # 使用标准模式收集全面结果

@@ -17,7 +17,6 @@ nodes:
     # 节点特定配置
     docker_compose_path: "/opt/inference"    # Docker Compose工作目录
     work_dir: "/opt/inference"               # 工作目录
-    results_path: "/opt/benchmark/results"   # 测试结果路径
     
   # 节点2 - 工作节点
   node2:
@@ -31,7 +30,6 @@ nodes:
     
     docker_compose_path: "/opt/inference"
     work_dir: "/opt/inference"
-    results_path: "/opt/benchmark/results"
     
   # 节点3 - 工作节点
   node3:
@@ -45,7 +43,6 @@ nodes:
     
     docker_compose_path: "/opt/inference"
     work_dir: "/opt/inference"
-    results_path: "/opt/benchmark/results"
     
   # 节点4 - 备用节点（默认禁用）
   node4:
@@ -59,18 +56,7 @@ nodes:
 
     docker_compose_path: "/opt/inference"
     work_dir: "/opt/inference"
-    results_path: "/opt/benchmark/results"
 
-# 全局配置
-global_config:
-  # SSH连接池配置
-  ssh_pool_size: 10
-  connection_timeout: 30
-  
-  # 默认路径配置
-  default_docker_compose_path: "/opt/inference"
-  default_work_dir: "/opt/inference"
-  default_results_path: "/opt/benchmark/results"
 
 # 环境变量设置说明
 # 请在系统中设置以下环境变量，或在.env文件中配置：

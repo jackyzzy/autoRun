@@ -49,7 +49,7 @@ class Node:
         role: 节点角色，如'master', 'worker'等
         enabled: 是否启用此节点
         docker_compose_path: Docker Compose文件路径
-        results_path: 测试结果存储路径
+        work_dir: 工作目录路径
         env_vars: 环境变量映射
 
     Examples:
@@ -79,7 +79,6 @@ class Node:
         # 节点特定配置
         self.docker_compose_path = config.get('docker_compose_path', '/opt/inference')
         self.work_dir = config.get('work_dir', '/opt/inference')
-        self.results_path = config.get('results_path', '/home/zjwei/benchmark/results')
 
         # Docker Compose版本配置（新增）
         self.docker_compose_version = config.get('docker_compose_version', 'auto')
@@ -103,7 +102,6 @@ class Node:
             'enabled': self.enabled,
             'docker_compose_path': self.docker_compose_path,
             'work_dir': self.work_dir,
-            'results_path': self.results_path,
             'docker_compose_version': self.docker_compose_version
         }
 

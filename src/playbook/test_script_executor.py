@@ -335,12 +335,17 @@ class TestScriptExecutor:
                 )
             
             # 设置执行权限并运行脚本
+            # 构建结果路径环境变量
+            if test_config.result_paths:
+                result_paths_str = os.pathsep.join(map(str, test_config.result_paths))
+            else:
+                result_paths_str = ''
             commands = [
                 f"chmod +x {remote_script_path}",
                 f"cd {node.work_dir}",
                 f"export SCENARIO_NAME='{scenario.name}'",
                 f"export SCENARIO_PATH='{node.work_dir}'",
-                f"export SCENARIO_RESULT_PATH='{node.results_path}'",
+                f"export SCENARIO_RESULT_PATH='{result_paths_str}'",
                 f"bash {remote_script_path}"
             ]
             
@@ -360,7 +365,7 @@ class TestScriptExecutor:
             exit_code, stdout, stderr = node_result
             
             # 收集远程结果文件
-            artifacts = self._collect_remote_artifacts(node_name, node, test_config.result_paths)
+            artifacts = self._collect_remote_artifacts(node_name, test_config.result_paths)
             
             # 解析测试指标
             metrics = self._parse_test_metrics(stdout, stderr)
@@ -432,7 +437,7 @@ class TestScriptExecutor:
         
         return artifacts
     
-    def _collect_remote_artifacts(self, node_name: str, node, result_paths: List[str]) -> List[str]:
+    def _collect_remote_artifacts(self, node_name: str, result_paths: List[str]) -> List[str]:
         """收集远程结果文件"""
         artifacts = []
         

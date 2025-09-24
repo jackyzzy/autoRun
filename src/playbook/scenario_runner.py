@@ -341,38 +341,6 @@ class ScenarioRunner:
             )
             logger.info("Uploaded test configuration to nodes")
     
-    def _collect_test_results(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """收集测试结果"""
-        logger.info("Collecting test results")
-        
-        # 从各个节点收集结果
-        nodes = self.node_manager.get_nodes(enabled_only=True)
-        collected_files = []
-        
-        for node in nodes:
-            try:
-                # 创建结果目录
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                local_result_dir = f"results/{timestamp}/{scenario.name}"
-                
-                # 下载结果文件
-                download_results = self.node_manager.download_files(
-                    node.results_path,
-                    local_result_dir,
-                    [node.name]
-                )
-                
-                if download_results.get(node.name, False):
-                    collected_files.append(f"{local_result_dir}/{node.name}")
-                    logger.info(f"Collected results from {node.name}")
-                else:
-                    logger.warning(f"Failed to collect results from {node.name}")
-                    
-            except Exception as e:
-                logger.error(f"Error collecting results from {node.name}: {e}")
-        
-        result.artifacts = collected_files
-        logger.info(f"Collected results from {len(collected_files)} locations")
     
     def _stop_inference_services(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """停止推理服务"""
@@ -425,12 +393,47 @@ class ScenarioRunner:
                 logger.warning(f"Cleanup command failed: {e}")
         
         logger.info("Cleanup completed")
-    
+
+    def _get_collection_mode(self, scenario: Scenario):
+        """根据配置获取收集模式"""
+        from .result_collector import CollectionMode
+
+        # 1. 优先使用场景级别的配置
+        if scenario.metadata and scenario.metadata.test_execution:
+            config_mode = scenario.metadata.test_execution.collection_mode
+            if config_mode:
+                try:
+                    return CollectionMode(config_mode.lower())
+                except ValueError:
+                    self.logger.warning(f"Invalid collection mode '{config_mode}', using default")
+
+        # 2. 检查场景管理器的全局配置
+        if hasattr(self.scenario_manager, 'execution_config'):
+            global_mode = self.scenario_manager.execution_config.get('default_collection_mode')
+            if global_mode:
+                try:
+                    return CollectionMode(global_mode.lower())
+                except ValueError:
+                    self.logger.warning(f"Invalid global collection mode '{global_mode}', using default")
+
+        # 3. 根据场景复杂度自动选择模式
+        if scenario.metadata and scenario.metadata.services:
+            service_count = len(scenario.metadata.services)
+            if service_count >= 3:
+                # 复杂场景使用 COMPREHENSIVE 模式
+                return CollectionMode.COMPREHENSIVE
+            elif service_count >= 1:
+                # 中等复杂度使用 STANDARD 模式
+                return CollectionMode.STANDARD
+
+        # 4. 默认使用 STANDARD 模式
+        return CollectionMode.STANDARD
+
     def cancel(self):
         """取消执行"""
         self.cancelled = True
         self.logger.info("Cancelling scenario execution")
-        
+
         if self.current_scenario:
             current_result = self.results.get(self.current_scenario)
             if current_result and current_result.status == ScenarioStatus.RUNNING:
@@ -643,48 +646,65 @@ class ScenarioRunner:
             logger.info(f"Test metrics: {test_result.metrics}")
     
     def _collect_distributed_results(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
-        """收集分布式结果"""
-        services = scenario.metadata.services
-        test_config = scenario.metadata.test_execution
-        
-        logger.info("Collecting distributed results")
-        
-        collected_files = []
-        
-        # 从测试执行中已经收集了artifacts，这里收集额外的结果
-        if test_config.result_paths:
-            logger.info(f"Collecting additional results from {len(test_config.result_paths)} paths")
-            
-            # 结果已在test_executor中收集，这里只需要记录
-            logger.info(f"Total artifacts collected: {len(result.artifacts)}")
-        
-        # 从各个服务节点收集日志（可选）
-        for service in services:
-            for node_name in service.nodes:
-                try:
-                    # 收集容器日志
-                    log_cmd = f"docker logs {service.name} --tail 100"
-                    results = self.node_manager.execute_command(log_cmd, [node_name])
-                    
-                    if results.get(node_name) and results[node_name][0] == 0:
-                        log_content = results[node_name][1]
-                        
-                        # 保存日志到本地文件
-                        from datetime import datetime
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        log_file = f"results/{timestamp}/{service.name}_{node_name}.log"
-                        
-                        os.makedirs(os.path.dirname(log_file), exist_ok=True)
-                        with open(log_file, 'w') as f:
-                            f.write(log_content)
-                        
-                        collected_files.append(log_file)
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to collect logs from {service.name}@{node_name}: {e}")
-        
-        result.artifacts.extend(collected_files)
-        logger.info(f"Collected results from {len(collected_files)} additional sources")
+        """收集分布式结果 - 使用新的ResultCollector"""
+        logger.info("Collecting distributed results using ResultCollector")
+
+        try:
+            # 从result.metrics中获取test_execution_result
+            test_execution_result = None
+            if 'test_execution' in result.metrics:
+                # 创建TestExecutionResult对象
+                from .test_script_executor import TestExecutionResult
+                test_execution_result = TestExecutionResult(
+                    success=result.metrics['test_execution'].get('success', False),
+                    exit_code=result.metrics['test_execution'].get('exit_code', -1),
+                    duration=result.metrics['test_execution'].get('duration', 0.0),
+                    artifacts=result.artifacts.copy(),  # 使用已收集的artifacts
+                    metrics=result.metrics['test_execution'].get('metrics', {})
+                )
+
+            # 使用ResultCollector收集结果
+            from .result_collector import ResultCollector, CollectionMode
+            result_collector = ResultCollector(self.node_manager)
+
+            # 根据配置选择收集模式
+            collection_mode = self._get_collection_mode(scenario)
+
+            # 执行结果收集
+            if test_execution_result is not None:
+                summary = result_collector.collect_scenario_results(
+                    scenario, result, test_execution_result, collection_mode
+                )
+            else:
+                # 如果没有测试执行结果，创建一个空的结果对象
+                from .test_script_executor import TestExecutionResult
+                empty_test_result = TestExecutionResult(
+                    success=True,
+                    artifacts=result.artifacts.copy()
+                )
+                summary = result_collector.collect_scenario_results(
+                    scenario, result, empty_test_result, collection_mode
+                )
+
+            # 将结果摘要信息添加到scenario result中
+            result.metrics['result_collection'] = {
+                'collection_mode': collection_mode.value,
+                'total_files': summary.total_result_files,
+                'total_size_mb': summary.total_size_mb,
+                'successful_nodes': summary.successful_nodes,
+                'failed_nodes': summary.failed_nodes
+            }
+
+            logger.info(f"Result collection completed: {summary.total_result_files} files, "
+                       f"{summary.total_size_mb:.2f} MB total")
+
+        except Exception as e:
+            logger.error(f"Failed to collect distributed results: {e}")
+            # 不抛出异常，允许场景继续完成
+            result.metrics['result_collection'] = {
+                'error': str(e),
+                'collection_mode': 'failed'
+            }
     
     def _stop_distributed_services(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """停止分布式服务（支持并发）"""

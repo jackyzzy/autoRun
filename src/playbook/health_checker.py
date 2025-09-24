@@ -476,9 +476,9 @@ class HealthChecker:
                 if not node:
                     continue
                 
-                # 检查结果目录
-                if node.results_path:
-                    storage_paths.append(os.path.dirname(node.results_path))
+                # 检查工作目录
+                if node.work_dir:
+                    storage_paths.append(node.work_dir)
                 
                 for path in storage_paths:
                     try:
