@@ -120,7 +120,8 @@ class DockerComposeManager:
                     node_name=node_name,
                     command_type="up",
                     file=compose_file,
-                    services=services or []
+                    services=services or [],
+                    env_file=".env"  # 使用节点上的.env文件
                 )
 
                 # 添加detach参数处理
@@ -195,7 +196,8 @@ class DockerComposeManager:
                         node_name=node_name,
                         command_type="stop",
                         file=compose_file,
-                        services=services
+                        services=services,
+                        env_file=".env"  # 使用节点上的.env文件
                     )
                     self.logger.info(f"Stopping specific services on {node_name}: {services}")
                 else:
@@ -203,7 +205,8 @@ class DockerComposeManager:
                     compose_cmd = self.node_manager.build_compose_command(
                         node_name=node_name,
                         command_type="down",
-                        file=compose_file
+                        file=compose_file,
+                        env_file=".env"  # 使用节点上的.env文件
                     )
                     # 如果需要删除卷，修改命令
                     if remove_volumes:
@@ -334,7 +337,8 @@ class DockerComposeManager:
                     command_type="logs",
                     file=compose_file,
                     lines=str(lines),
-                    services=[service_name]
+                    services=[service_name],
+                    env_file=".env"  # 使用节点上的.env文件
                 )
 
                 # 添加follow参数处理
@@ -392,7 +396,8 @@ class DockerComposeManager:
                     command_type="scale",
                     file=compose_file,
                     service=service_name,
-                    replicas=str(replicas)
+                    replicas=str(replicas),
+                    env_file=".env"  # 使用节点上的.env文件
                 )
 
                 full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"

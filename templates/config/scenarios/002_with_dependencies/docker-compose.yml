@@ -7,10 +7,10 @@ version: '3.8'
 services:
   # 📊 Batch 1: 基础服务层
   redis:
-    image: "redis:7-alpine"
-    container_name: "demo_redis"
+    image: "${REDIS_IMAGE}:${REDIS_TAG}"
+    container_name: "${REDIS_CONTAINER_NAME}"
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT}:${REDIS_CONTAINER_PORT}"
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
@@ -28,15 +28,15 @@ services:
         max-file: "3"
 
   mysql:
-    image: "mysql:8.0"
-    container_name: "demo_mysql"
+    image: "${MYSQL_IMAGE}:${MYSQL_TAG}"
+    container_name: "${MYSQL_CONTAINER_NAME}"
     ports:
-      - "3306:3306"
+      - "${MYSQL_HOST_PORT}:${MYSQL_CONTAINER_PORT}"
     environment:
-      MYSQL_ROOT_PASSWORD: "demo_password"
-      MYSQL_DATABASE: "demo_db"
-      MYSQL_USER: "demo_user"
-      MYSQL_PASSWORD: "demo_pass"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE}"
+      MYSQL_USER: "${MYSQL_USER}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -53,10 +53,10 @@ services:
         max-file: "3"
 
   config-service:
-    image: "nginx:alpine"
-    container_name: "demo_config_service"
+    image: "${CONFIG_SERVICE_IMAGE}:${CONFIG_SERVICE_TAG}"
+    container_name: "${CONFIG_SERVICE_CONTAINER_NAME}"
     ports:
-      - "8090:80"
+      - "${CONFIG_SERVICE_HOST_PORT}:${CONFIG_SERVICE_CONTAINER_PORT}"
     volumes:
       - ./config:/usr/share/nginx/html:ro
     healthcheck:
@@ -71,14 +71,14 @@ services:
   # 注意：Docker Compose的depends_on只控制启动顺序，不等待服务就绪
   # Playbook的depends_on会等待依赖服务完全就绪（包括健康检查）
   user-service:
-    image: "demo/user-service:latest"
-    container_name: "demo_user_service"
+    image: "${USER_SERVICE_IMAGE}:${USER_SERVICE_TAG}"
+    container_name: "${USER_SERVICE_CONTAINER_NAME}"
     ports:
-      - "8001:8000"
+      - "${USER_SERVICE_HOST_PORT}:${USER_SERVICE_CONTAINER_PORT}"
     environment:
-      REDIS_URL: "redis://redis:6379"
-      DATABASE_URL: "mysql://demo_user:demo_pass@mysql:3306/demo_db"
-      CONFIG_SERVICE_URL: "http://config-service:80"
+      REDIS_URL: "${REDIS_URL}"
+      DATABASE_URL: "${DATABASE_URL}"
+      CONFIG_SERVICE_URL: "${CONFIG_SERVICE_URL}"
     # Docker Compose的depends_on（启动顺序依赖）
     depends_on:
       - redis
@@ -94,14 +94,14 @@ services:
     restart: unless-stopped
 
   order-service:
-    image: "demo/order-service:latest"
-    container_name: "demo_order_service"
+    image: "${ORDER_SERVICE_IMAGE}:${ORDER_SERVICE_TAG}"
+    container_name: "${ORDER_SERVICE_CONTAINER_NAME}"
     ports:
-      - "8002:8000"
+      - "${ORDER_SERVICE_HOST_PORT}:${ORDER_SERVICE_CONTAINER_PORT}"
     environment:
-      REDIS_URL: "redis://redis:6379"
-      DATABASE_URL: "mysql://demo_user:demo_pass@mysql:3306/demo_db"
-      USER_SERVICE_URL: "http://user-service:8000"
+      REDIS_URL: "${REDIS_URL}"
+      DATABASE_URL: "${DATABASE_URL}"
+      USER_SERVICE_URL: "${USER_SERVICE_URL}"
     depends_on:
       - redis
       - mysql
@@ -115,14 +115,14 @@ services:
 
   # 📊 Batch 3: 网关层 (依赖Batch 1和2)
   api-gateway:
-    image: "demo/api-gateway:latest"
-    container_name: "demo_api_gateway"
+    image: "${API_GATEWAY_IMAGE}:${API_GATEWAY_TAG}"
+    container_name: "${API_GATEWAY_CONTAINER_NAME}"
     ports:
-      - "8080:8080"
+      - "${API_GATEWAY_HOST_PORT}:${API_GATEWAY_CONTAINER_PORT}"
     environment:
-      USER_SERVICE_URL: "http://user-service:8000"
-      ORDER_SERVICE_URL: "http://order-service:8000"
-      CONFIG_SERVICE_URL: "http://config-service:80"
+      USER_SERVICE_URL: "${USER_SERVICE_URL}"
+      ORDER_SERVICE_URL: "${ORDER_SERVICE_URL}"
+      CONFIG_SERVICE_URL: "${CONFIG_SERVICE_URL}"
     depends_on:
       - user-service
       - order-service
@@ -137,12 +137,12 @@ services:
 
   # 📊 Batch 4: 前端层 (依赖Batch 3)
   web-frontend:
-    image: "demo/web-frontend:latest"
-    container_name: "demo_web_frontend"
+    image: "${WEB_FRONTEND_IMAGE}:${WEB_FRONTEND_TAG}"
+    container_name: "${WEB_FRONTEND_CONTAINER_NAME}"
     ports:
-      - "3000:3000"
+      - "${WEB_FRONTEND_HOST_PORT}:${WEB_FRONTEND_CONTAINER_PORT}"
     environment:
-      API_GATEWAY_URL: "http://api-gateway:8080"
+      API_GATEWAY_URL: "${API_GATEWAY_URL}"
     depends_on:
       - api-gateway
     healthcheck:
@@ -154,12 +154,12 @@ services:
     restart: unless-stopped
 
   mobile-app-backend:
-    image: "demo/mobile-backend:latest"
-    container_name: "demo_mobile_backend"
+    image: "${MOBILE_BACKEND_IMAGE}:${MOBILE_BACKEND_TAG}"
+    container_name: "${MOBILE_BACKEND_CONTAINER_NAME}"
     ports:
-      - "8003:8000"
+      - "${MOBILE_BACKEND_HOST_PORT}:${MOBILE_BACKEND_CONTAINER_PORT}"
     environment:
-      API_GATEWAY_URL: "http://api-gateway:8080"
+      API_GATEWAY_URL: "${API_GATEWAY_URL}"
     depends_on:
       - api-gateway
     healthcheck:
@@ -180,7 +180,7 @@ volumes:
 # 🌐 网络配置
 networks:
   default:
-    name: demo_network
+    name: ${NETWORK_NAME}
     driver: bridge
 
 # 📝 重要说明：

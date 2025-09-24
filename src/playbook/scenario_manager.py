@@ -6,6 +6,7 @@
 import os
 import yaml
 import logging
+import re
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -303,6 +304,7 @@ class Scenario:
     docker_compose_file: str = ""
     test_config_file: str = ""
     run_script: str = ""
+    env_file: str = ""
     
     def __post_init__(self):
         if not self.description and self.metadata:
@@ -357,6 +359,23 @@ class Scenario:
         
         return ""
     
+    def get_env_file_path(self) -> str:
+        """获取环境变量文件路径"""
+        if self.env_file:
+            return self.env_file
+        
+        # 尝试常见的环境变量文件名
+        for filename in [".env", "env", "environment.env"]:
+            env_path = self.full_path / filename
+            if env_path.exists():
+                return str(env_path)
+        
+        return ""
+    
+    def has_env_file(self) -> bool:
+        """检查是否存在环境变量文件"""
+        return bool(self.get_env_file_path())
+    
     def _find_docker_compose_file(self, directory: Path) -> Optional[Path]:
         """查找docker-compose文件，支持.yml和.yaml扩展名"""
         for ext in [".yml", ".yaml"]:
@@ -382,6 +401,7 @@ class Scenario:
             'docker_compose_file': self.docker_compose_file,
             'test_config_file': self.test_config_file,
             'run_script': self.run_script,
+            'env_file': self.env_file,
             'metadata': self.metadata.to_dict() if self.metadata else None
         }
 
@@ -826,3 +846,164 @@ class ScenarioManager:
                 scenario_config[key] = value
 
         return self.global_config_manager.get_merged_config('concurrent_execution', scenario_config)
+    
+    def validate_env_file(self, scenario_name: str) -> Dict[str, Any]:
+        """验证scenario的环境变量文件
+        
+        Args:
+            scenario_name: scenario名称
+            
+        Returns:
+            验证结果字典，包含是否有效、错误信息、警告信息等
+        """
+        result = {
+            'is_valid': True,
+            'has_env_file': False,
+            'env_file_path': '',
+            'errors': [],
+            'warnings': [],
+            'env_vars': {},
+            'missing_vars': []
+        }
+        
+        if scenario_name not in self.scenarios:
+            result['is_valid'] = False
+            result['errors'].append(f"Scenario not found: {scenario_name}")
+            return result
+        
+        scenario = self.scenarios[scenario_name]
+        env_file_path = scenario.get_env_file_path()
+        
+        if not env_file_path:
+            result['warnings'].append("No environment file (.env) found in scenario")
+            return result
+        
+        result['has_env_file'] = True
+        result['env_file_path'] = env_file_path
+        
+        try:
+            env_vars, errors, warnings = self._parse_env_file(env_file_path)
+            result['env_vars'] = env_vars
+            result['errors'].extend(errors)
+            result['warnings'].extend(warnings)
+            
+            if errors:
+                result['is_valid'] = False
+            
+            # 检查Docker Compose文件中引用的变量
+            missing_vars = self._check_compose_env_references(scenario, env_vars)
+            result['missing_vars'] = missing_vars
+            
+            if missing_vars:
+                result['warnings'].extend([f"Variable referenced in docker-compose.yml but not defined in .env: {var}" for var in missing_vars])
+            
+        except Exception as e:
+            result['is_valid'] = False
+            result['errors'].append(f"Failed to parse environment file: {e}")
+        
+        return result
+    
+    def _parse_env_file(self, env_file_path: str) -> Tuple[Dict[str, str], List[str], List[str]]:
+        """解析环境变量文件
+        
+        Args:
+            env_file_path: 环境变量文件路径
+            
+        Returns:
+            Tuple[env_vars, errors, warnings]
+        """
+        env_vars = {}
+        errors = []
+        warnings = []
+        
+        try:
+            with open(env_file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    
+                    # 跳过空行和注释
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    # 验证格式: KEY=VALUE
+                    if '=' not in line:
+                        errors.append(f"Line {line_num}: Invalid format, expected KEY=VALUE")
+                        continue
+                    
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    
+                    # 验证变量名格式
+                    if not re.match(r'^[A-Z][A-Z0-9_]*$', key):
+                        warnings.append(f"Line {line_num}: Variable name '{key}' should use UPPERCASE_WITH_UNDERSCORES format")
+                    
+                    # 检查重复定义
+                    if key in env_vars:
+                        warnings.append(f"Line {line_num}: Variable '{key}' is already defined")
+                    
+                    # 移除引号（如果存在）
+                    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                        value = value[1:-1]
+                    
+                    env_vars[key] = value
+                    
+        except Exception as e:
+            errors.append(f"Failed to read environment file: {e}")
+        
+        return env_vars, errors, warnings
+    
+    def _check_compose_env_references(self, scenario: 'Scenario', env_vars: Dict[str, str]) -> List[str]:
+        """检查Docker Compose文件中引用的环境变量
+        
+        Args:
+            scenario: scenario对象
+            env_vars: 环境变量字典
+            
+        Returns:
+            缺失的环境变量列表
+        """
+        missing_vars = []
+        compose_file_path = scenario.get_docker_compose_path()
+        
+        if not compose_file_path or not Path(compose_file_path).exists():
+            return missing_vars
+        
+        try:
+            with open(compose_file_path, 'r', encoding='utf-8') as f:
+                compose_content = f.read()
+            
+            # 查找所有的环境变量引用 ${VAR} 或 $VAR
+            var_pattern = r'\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)'
+            matches = re.findall(var_pattern, compose_content)
+            
+            referenced_vars = set()
+            for match in matches:
+                # match是一个tuple，其中一个元素是空字符串
+                var_name = match[0] if match[0] else match[1]
+                referenced_vars.add(var_name)
+            
+            # 检查引用的变量是否在.env文件中定义
+            for var in referenced_vars:
+                if var not in env_vars and var not in os.environ:
+                    missing_vars.append(var)
+                    
+        except Exception as e:
+            self.logger.warning(f"Failed to check environment variables in docker-compose.yml: {e}")
+        
+        return missing_vars
+    
+    def get_scenarios_with_env_files(self) -> Dict[str, str]:
+        """获取所有包含环境变量文件的scenarios
+        
+        Returns:
+            scenario名称到环境变量文件路径的映射
+        """
+        scenarios_with_env = {}
+        
+        for name, scenario in self.scenarios.items():
+            env_file_path = scenario.get_env_file_path()
+            if env_file_path:
+                scenarios_with_env[name] = env_file_path
+        
+        return scenarios_with_env

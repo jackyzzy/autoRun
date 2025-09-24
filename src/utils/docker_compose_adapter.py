@@ -104,37 +104,37 @@ class DockerComposeAdapter:
     COMMAND_TEMPLATES = {
         DockerComposeVersion.V1: {
             "base_cmd": "docker-compose",
-            "up": "docker-compose -f {file} up -d {services}",
-            "down": "docker-compose -f {file} down",
-            "stop": "docker-compose -f {file} stop {services}",
-            "rm": "docker-compose -f {file} rm -f {services}",
-            "logs": "docker-compose -f {file} logs --tail {lines} {services}",
-            "scale": "docker-compose -f {file} up -d --scale {service}={replicas}",
+            "up": "docker-compose{env_file} -f {file} up -d {services}",
+            "down": "docker-compose{env_file} -f {file} down",
+            "stop": "docker-compose{env_file} -f {file} stop {services}",
+            "rm": "docker-compose{env_file} -f {file} rm -f {services}",
+            "logs": "docker-compose{env_file} -f {file} logs --tail {lines} {services}",
+            "scale": "docker-compose{env_file} -f {file} up -d --scale {service}={replicas}",
             "version": "docker-compose version",
-            "ps": "docker-compose -f {file} ps",
-            "exec": "docker-compose -f {file} exec {service} {command}",
-            "pull": "docker-compose -f {file} pull {services}",
-            "build": "docker-compose -f {file} build {services}",
-            "restart": "docker-compose -f {file} restart {services}",
-            "pause": "docker-compose -f {file} pause {services}",
-            "unpause": "docker-compose -f {file} unpause {services}"
+            "ps": "docker-compose{env_file} -f {file} ps",
+            "exec": "docker-compose{env_file} -f {file} exec {service} {command}",
+            "pull": "docker-compose{env_file} -f {file} pull {services}",
+            "build": "docker-compose{env_file} -f {file} build {services}",
+            "restart": "docker-compose{env_file} -f {file} restart {services}",
+            "pause": "docker-compose{env_file} -f {file} pause {services}",
+            "unpause": "docker-compose{env_file} -f {file} unpause {services}"
         },
         DockerComposeVersion.V2: {
             "base_cmd": "docker compose",
-            "up": "docker compose -f {file} up -d {services}",
-            "down": "docker compose -f {file} down",
-            "stop": "docker compose -f {file} stop {services}",
-            "rm": "docker compose -f {file} rm -f {services}",
-            "logs": "docker compose -f {file} logs --tail {lines} {services}",
-            "scale": "docker compose -f {file} up -d --scale {service}={replicas}",
+            "up": "docker compose{env_file} -f {file} up -d {services}",
+            "down": "docker compose{env_file} -f {file} down",
+            "stop": "docker compose{env_file} -f {file} stop {services}",
+            "rm": "docker compose{env_file} -f {file} rm -f {services}",
+            "logs": "docker compose{env_file} -f {file} logs --tail {lines} {services}",
+            "scale": "docker compose{env_file} -f {file} up -d --scale {service}={replicas}",
             "version": "docker compose version",
-            "ps": "docker compose -f {file} ps",
-            "exec": "docker compose -f {file} exec {service} {command}",
-            "pull": "docker compose -f {file} pull {services}",
-            "build": "docker compose -f {file} build {services}",
-            "restart": "docker compose -f {file} restart {services}",
-            "pause": "docker compose -f {file} pause {services}",
-            "unpause": "docker compose -f {file} unpause {services}"
+            "ps": "docker compose{env_file} -f {file} ps",
+            "exec": "docker compose{env_file} -f {file} exec {service} {command}",
+            "pull": "docker compose{env_file} -f {file} pull {services}",
+            "build": "docker compose{env_file} -f {file} build {services}",
+            "restart": "docker compose{env_file} -f {file} restart {services}",
+            "pause": "docker compose{env_file} -f {file} pause {services}",
+            "unpause": "docker compose{env_file} -f {file} unpause {services}"
         }
     }
 
@@ -234,6 +234,7 @@ class DockerComposeAdapter:
             command_type: 命令类型，如'up', 'down', 'stop', 'logs'等
             **kwargs: 命令参数，常用参数包括:
                 - file: docker-compose文件路径
+                - env_file: 环境变量文件路径（可选）
                 - services: 服务名列表或字符串
                 - lines: 日志行数(仅logs命令)
                 - service: 服务名(仅exec/scale命令)
@@ -252,6 +253,10 @@ class DockerComposeAdapter:
             >>> cmd = adapter.build_command("up", file="app.yml", services=["web", "db"])
             >>> print(cmd.full_cmd)
             'docker compose -f app.yml up -d web db'
+            >>>
+            >>> cmd_with_env = adapter.build_command("up", file="app.yml", env_file=".env", services="web")
+            >>> print(cmd_with_env.full_cmd)
+            'docker compose --env-file .env -f app.yml up -d web'
             >>>
             >>> log_cmd = adapter.build_command("logs", file="app.yml", services="web", lines=100)
             >>> print(log_cmd.full_cmd)
@@ -301,6 +306,16 @@ class DockerComposeAdapter:
                 processed["file"] = str(file_path.name)
             else:
                 processed["file"] = str(Path(file_path).name)
+
+        # 处理环境变量文件
+        if "env_file" in params and params["env_file"]:
+            env_file_path = params["env_file"]
+            if isinstance(env_file_path, Path):
+                processed["env_file"] = f" --env-file {env_file_path.name}"
+            else:
+                processed["env_file"] = f" --env-file {Path(env_file_path).name}"
+        else:
+            processed["env_file"] = ""
 
         # 处理服务列表
         if "services" in params:

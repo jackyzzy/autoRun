@@ -192,7 +192,7 @@ class NodeManager:
         """获取节点名称列表"""
         return [node.name for node in self.get_nodes(**kwargs)]
     
-    def test_connectivity(self, node_names: List[str] = None, 
+    def test_connectivity(self, node_names: Optional[List[str]] = None, 
                          timeout: int = 10) -> Dict[str, bool]:
         """测试节点连接性"""
         if node_names is None:
@@ -229,7 +229,7 @@ class NodeManager:
         
         return results
     
-    def execute_command(self, command: str, node_names: List[str] = None,
+    def execute_command(self, command: str, node_names: Optional[List[str]] = None,
                        parallel: bool = True, timeout: int = 300,
                        stop_on_error: bool = False) -> Dict[str, Tuple[int, str, str]]:
         """在节点上执行命令"""
@@ -284,7 +284,7 @@ class NodeManager:
         return results
     
     def upload_file(self, local_path: str, remote_path: str,
-                   node_names: List[str] = None) -> Dict[str, bool]:
+                   node_names: Optional[List[str]] = None) -> Dict[str, bool]:
         """上传文件到节点"""
         if node_names is None:
             node_names = self.get_node_names(enabled_only=True)
@@ -341,7 +341,7 @@ class NodeManager:
         return results
     
     def download_files(self, remote_path: str, local_base_path: str,
-                      node_names: List[str] = None) -> Dict[str, bool]:
+                      node_names: Optional[List[str]] = None) -> Dict[str, bool]:
         """从节点下载文件"""
         if node_names is None:
             node_names = self.get_node_names(enabled_only=True)
@@ -382,7 +382,183 @@ class NodeManager:
         
         return results
     
-    def get_node_status(self, node_names: List[str] = None) -> Dict[str, Dict[str, Any]]:
+    def upload_scenario_env_file(self, env_file_path: str, scenario_name: str,
+                                node_names: Optional[List[str]] = None) -> Dict[str, bool]:
+        """增强版scenario环境变量文件上传
+        
+        Args:
+            env_file_path: 本地环境变量文件路径
+            scenario_name: scenario名称（用于日志记录）
+            node_names: 目标节点名称列表，为空则上传到所有启用的节点
+            
+        Returns:
+            节点名称到上传结果的映射
+        """
+        if not env_file_path or not Path(env_file_path).exists():
+            self.logger.error(f"Environment file not found: {env_file_path}")
+            return {}
+        
+        if node_names is None:
+            node_names = self.get_node_names(enabled_only=True)
+        
+        # 记录本地文件信息
+        local_file_info = Path(env_file_path).stat()
+        self.logger.info(f"Uploading .env file for scenario '{scenario_name}': {env_file_path} ({local_file_info.st_size} bytes)")
+        
+        results = {}
+        
+        def upload_env_to_node(node_name: str) -> Tuple[str, bool]:
+            try:
+                node = self.nodes[node_name]
+                client = node.get_ssh_client()
+                
+                # 🔧 增强: 检查路径一致性并选择最佳上传路径
+                if node.work_dir != node.docker_compose_path:
+                    self.logger.warning(f"Path inconsistency on {node_name}: work_dir({node.work_dir}) != docker_compose_path({node.docker_compose_path})")
+                    self.logger.info(f"Using docker_compose_path for {node_name}: {node.docker_compose_path}")
+                    target_dir = node.docker_compose_path
+                else:
+                    target_dir = node.work_dir
+                
+                remote_env_path = f"{target_dir}/.env"
+                
+                with client.connection_context():
+                    # 🔧 增强: 确保目标目录存在
+                    mkdir_result = client.execute_command(f"mkdir -p {target_dir}", check_exit_code=False)
+                    self.logger.debug(f"Created directory {target_dir} on {node_name}: exit_code={mkdir_result[0]}")
+                    
+                    # 🔧 增强: 备份现有文件（如果存在）
+                    backup_cmd = f"test -f {remote_env_path} && cp {remote_env_path} {remote_env_path}.bak || true"
+                    backup_result = client.execute_command(backup_cmd, check_exit_code=False)
+                    self.logger.debug(f"Backup existing .env on {node_name}: exit_code={backup_result[0]}")
+                    
+                    # 上传环境变量文件
+                    self.logger.debug(f"Uploading .env to {node_name}:{remote_env_path}")
+                    success = client.upload_file(env_file_path, remote_env_path)
+                    
+                    if success:
+                        # 设置正确的文件权限
+                        chmod_result = client.execute_command(f"chmod 644 {remote_env_path}", check_exit_code=False)
+                        
+                        # 🔧 增强: 立即验证上传结果
+                        verify_result = client.execute_command(f"test -f {remote_env_path} && wc -c {remote_env_path}", check_exit_code=False)
+                        if verify_result[0] == 0:
+                            remote_size = int(verify_result[1].strip().split()[0])
+                            if remote_size == local_file_info.st_size:
+                                self.logger.info(f"✅ Successfully uploaded and verified .env file for scenario '{scenario_name}' to {node_name}:{remote_env_path} ({remote_size} bytes)")
+                                
+                                # 🔧 增强: 验证文件可读性和内容
+                                content_check = client.execute_command(f"head -1 {remote_env_path}", check_exit_code=False)
+                                if content_check[0] == 0:
+                                    first_line = content_check[1].strip()
+                                    self.logger.debug(f"Remote .env first line on {node_name}: {first_line[:50]}...")
+                                
+                                return node_name, True
+                            else:
+                                self.logger.error(f"❌ File size mismatch on {node_name}: local={local_file_info.st_size}, remote={remote_size}")
+                                return node_name, False
+                        else:
+                            self.logger.error(f"❌ Failed to verify uploaded .env file on {node_name}")
+                            return node_name, False
+                    else:
+                        self.logger.error(f"❌ Failed to upload .env file for scenario '{scenario_name}' to {node_name}")
+                        return node_name, False
+                        
+            except Exception as e:
+                self.logger.error(f"❌ Failed to upload .env file to {node_name}: {e}")
+                import traceback
+                self.logger.debug(f"Full traceback: {traceback.format_exc()}")
+                return node_name, False
+        
+        # 并发上传
+        with ThreadPoolExecutor(max_workers=min(len(node_names), 5)) as executor:
+            future_to_node = {
+                executor.submit(upload_env_to_node, node_name): node_name
+                for node_name in node_names
+            }
+            
+            for future in as_completed(future_to_node):
+                node_name, success = future.result()
+                results[node_name] = success
+        
+        success_count = sum(results.values())
+        failed_nodes = [name for name, success in results.items() if not success]
+        
+        if success_count == len(node_names):
+            self.logger.info(f"✅ Environment file upload for scenario '{scenario_name}': {success_count}/{len(node_names)} nodes succeeded")
+        else:
+            self.logger.error(f"❌ Environment file upload for scenario '{scenario_name}': {success_count}/{len(node_names)} nodes succeeded. Failed nodes: {failed_nodes}")
+        
+        return results
+    
+    def verify_env_file_on_nodes(self, scenario_name: str, node_names: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+        """验证节点上的环境变量文件是否存在且正确
+        
+        Args:
+            scenario_name: scenario名称（用于日志记录）
+            node_names: 要验证的节点名称列表
+            
+        Returns:
+            节点名称到验证结果的映射
+        """
+        if node_names is None:
+            node_names = self.get_node_names(enabled_only=True)
+        
+        results = {}
+        
+        def verify_env_on_node(node_name: str) -> Tuple[str, Dict[str, Any]]:
+            result = {
+                'exists': False,
+                'readable': False,
+                'size': 0,
+                'error': None
+            }
+            
+            try:
+                node = self.nodes[node_name]
+                client = node.get_ssh_client()
+                
+                remote_env_path = f"{node.work_dir}/.env"
+                
+                with client.connection_context():
+                    # 检查文件是否存在
+                    exit_code, _, _ = client.execute_command(f"test -f {remote_env_path}", check_exit_code=False)
+                    result['exists'] = exit_code == 0
+                    
+                    if result['exists']:
+                        # 检查文件是否可读
+                        exit_code, _, _ = client.execute_command(f"test -r {remote_env_path}", check_exit_code=False)
+                        result['readable'] = exit_code == 0
+                        
+                        # 获取文件大小
+                        exit_code, stdout, _ = client.execute_command(f"stat -c %s {remote_env_path}", check_exit_code=False)
+                        if exit_code == 0:
+                            result['size'] = int(stdout.strip())
+                    
+            except Exception as e:
+                result['error'] = str(e)
+                self.logger.error(f"Failed to verify .env file on {node_name}: {e}")
+            
+            return node_name, result
+        
+        # 并发验证
+        with ThreadPoolExecutor(max_workers=min(len(node_names), 5)) as executor:
+            future_to_node = {
+                executor.submit(verify_env_on_node, node_name): node_name
+                for node_name in node_names
+            }
+            
+            for future in as_completed(future_to_node):
+                node_name, result = future.result()
+                results[node_name] = result
+        
+        # 记录验证结果
+        valid_count = sum(1 for r in results.values() if r['exists'] and r['readable'])
+        self.logger.info(f"Environment file verification for scenario '{scenario_name}': {valid_count}/{len(node_names)} nodes have valid .env files")
+        
+        return results
+    
+    def get_node_status(self, node_names: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
         """获取节点状态信息"""
         if node_names is None:
             node_names = self.get_node_names(enabled_only=True)
@@ -485,7 +661,7 @@ class NodeManager:
             **kwargs
         )
 
-    def get_compose_version_info(self, node_names: List[str] = None) -> Dict[str, Dict[str, Any]]:
+    def get_compose_version_info(self, node_names: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
         """
         获取节点的Docker Compose版本信息
 

@@ -467,6 +467,136 @@ def validate(ctx):
         console.print(f"[red]Error validating configuration: {e}[/red]")
 
 
+@cli.command(name='validate-env')
+@click.option('--scenario', '-s', help='Validate environment variables for specific scenario')
+@click.option('--all', '-a', is_flag=True, help='Validate environment variables for all scenarios')
+@click.option('--format', '-f', type=click.Choice(['table', 'json', 'yaml']), 
+              default='table', help='Output format')
+@click.pass_context
+def validate_env(ctx, scenario, all, format):
+    """验证scenario环境变量配置"""
+    try:
+        core = get_playbook_core(ctx)
+        scenario_manager = core.scenario_manager
+        
+        if all:
+            console.print("[bold blue]Validating environment variables for all scenarios...[/bold blue]")
+            scenarios_with_env = scenario_manager.get_scenarios_with_env_files()
+            
+            if not scenarios_with_env:
+                console.print("[yellow]No scenarios with environment files found[/yellow]")
+                return
+            
+            validation_results = {}
+            for scenario_name in scenarios_with_env.keys():
+                validation_results[scenario_name] = scenario_manager.validate_env_file(scenario_name)
+            
+            if format == 'json':
+                console.print(json.dumps(validation_results, indent=2, ensure_ascii=False))
+            elif format == 'yaml':
+                console.print(yaml.dump(validation_results, default_flow_style=False, allow_unicode=True))
+            else:
+                # 表格格式
+                table = Table(title="Environment Variables Validation Results")
+                table.add_column("Scenario", style="cyan")
+                table.add_column("Status", justify="center")
+                table.add_column("Env File", justify="center")
+                table.add_column("Errors", justify="center", style="red")
+                table.add_column("Warnings", justify="center", style="yellow")
+                table.add_column("Missing Vars", justify="center", style="magenta")
+                
+                for scenario_name, result in validation_results.items():
+                    status_icon = "[green]✓[/green]" if result['is_valid'] else "[red]✗[/red]"
+                    env_file_icon = "[green]✓[/green]" if result['has_env_file'] else "[gray]✗[/gray]"
+                    
+                    table.add_row(
+                        scenario_name,
+                        status_icon,
+                        env_file_icon,
+                        str(len(result['errors'])),
+                        str(len(result['warnings'])),
+                        str(len(result['missing_vars']))
+                    )
+                
+                console.print(table)
+                
+                # 显示详细错误信息
+                for scenario_name, result in validation_results.items():
+                    if result['errors'] or result['warnings']:
+                        console.print(f"\n[bold]{scenario_name}[/bold]:")
+                        if result['errors']:
+                            console.print("  [red]Errors:[/red]")
+                            for error in result['errors']:
+                                console.print(f"    • [red]{error}[/red]")
+                        if result['warnings']:
+                            console.print("  [yellow]Warnings:[/yellow]")
+                            for warning in result['warnings']:
+                                console.print(f"    • [yellow]{warning}[/yellow]")
+                        if result['missing_vars']:
+                            console.print("  [magenta]Missing Variables:[/magenta]")
+                            for var in result['missing_vars']:
+                                console.print(f"    • [magenta]{var}[/magenta]")
+        
+        elif scenario:
+            console.print(f"[bold blue]Validating environment variables for scenario: {scenario}[/bold blue]")
+            result = scenario_manager.validate_env_file(scenario)
+            
+            if format == 'json':
+                console.print(json.dumps(result, indent=2, ensure_ascii=False))
+            elif format == 'yaml':
+                console.print(yaml.dump(result, default_flow_style=False, allow_unicode=True))
+            else:
+                # 详细显示单个scenario的验证结果
+                status_color = "green" if result['is_valid'] else "red"
+                status_text = "VALID" if result['is_valid'] else "INVALID"
+                console.print(f"\n[bold]Status:[/bold] [{status_color}]{status_text}[/{status_color}]")
+                
+                if not result['has_env_file']:
+                    console.print("[yellow]⚠ No environment file (.env) found[/yellow]")
+                    console.print("  Consider creating an .env file for this scenario")
+                    return
+                
+                console.print(f"[bold]Environment File:[/bold] {result['env_file_path']}")
+                console.print(f"[bold]Variables Found:[/bold] {len(result['env_vars'])}")
+                
+                if result['env_vars']:
+                    console.print("\n[bold]Environment Variables:[/bold]")
+                    for key, value in result['env_vars'].items():
+                        # 隐藏敏感信息
+                        if any(sensitive in key.lower() for sensitive in ['password', 'secret', 'token', 'key']):
+                            display_value = "***"
+                        else:
+                            display_value = value[:50] + "..." if len(value) > 50 else value
+                        console.print(f"  {key}={display_value}")
+                
+                if result['errors']:
+                    console.print("\n[bold red]Errors:[/bold red]")
+                    for error in result['errors']:
+                        console.print(f"  • [red]{error}[/red]")
+                
+                if result['warnings']:
+                    console.print("\n[bold yellow]Warnings:[/bold yellow]")
+                    for warning in result['warnings']:
+                        console.print(f"  • [yellow]{warning}[/yellow]")
+                
+                if result['missing_vars']:
+                    console.print("\n[bold magenta]Missing Variables (referenced in docker-compose.yml):[/bold magenta]")
+                    for var in result['missing_vars']:
+                        console.print(f"  • [magenta]{var}[/magenta]")
+                    console.print("\n[dim]These variables are used in docker-compose.yml but not defined in .env file")
+                    console.print("Consider adding them to the .env file or defining them as system environment variables[/dim]")
+        
+        else:
+            console.print("[red]Please specify --scenario SCENARIO_NAME or use --all flag[/red]")
+            console.print("\nExamples:")
+            console.print("  playbook validate-env --scenario 001_baseline")
+            console.print("  playbook validate-env --all")
+            console.print("  playbook validate-env --scenario 001_baseline --format json")
+        
+    except Exception as e:
+        console.print(f"[red]Error validating environment variables: {e}[/red]")
+
+
 @cli.command()
 @click.option('--format', '-f', type=click.Choice(['json', 'yaml', 'table']), 
               default='table', help='Output format')

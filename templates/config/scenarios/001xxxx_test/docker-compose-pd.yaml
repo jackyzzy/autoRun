@@ -3,50 +3,46 @@ version: '3.8'
 services:
   # P服务 - 主推理服务
   p-1:
-    image: "inference-engine:latest"
-    container_name: "inference-p-1"
+    image: "${INFERENCE_IMAGE}:${IMAGE_TAG}"
+    container_name: "${CONTAINER_PREFIX}-p-1"
     restart: unless-stopped
     environment:
-      - SERVICE_TYPE=primary
-      - GPU_MEMORY=24G
-      - MODEL_PATH=/data/your-model-path
-      - REPLICAS=2
-      # 根据场景需要添加其他环境变量
+      - SERVICE_TYPE=${PRIMARY_SERVICE_TYPE}
+      - GPU_MEMORY=${GPU_MEMORY}
+      - MODEL_PATH=${MODEL_PATH}
+      - REPLICAS=${REPLICAS}
     ports:
-      - "18008:8000"
+      - "${INFERENCE_HOST_PORT}:${SERVICE_PORT}"
     volumes:
-      - "/data:/data:ro"
-      - "/opt/inference/logs:/app/logs"
+      - "${DATA_VOLUME_PATH}:/data:ro"
+      - "${LOG_VOLUME_PATH}:/app/logs"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['0', '1']  # 根据需要调整GPU分配
+              device_ids: ['${GPU_DEVICE_IDS}']
               capabilities: [gpu]
     networks:
       - inference-network
 
   # D服务 - 数据处理服务  
   d-1:
-    image: "data-processor:latest"
-    container_name: "inference-d-1"
+    image: "${DATA_PROCESSOR_IMAGE}:${DATA_PROCESSOR_TAG}"
+    container_name: "${CONTAINER_PREFIX}-d-1"
     restart: unless-stopped
     environment:
-      - SERVICE_TYPE=data
-      - BATCH_SIZE=32
-      # 根据场景需要调整配置
+      - SERVICE_TYPE=${DATA_SERVICE_TYPE}
+      - BATCH_SIZE=${BATCH_SIZE}
     ports:
-      - "18009:8001"
+      - "${DATA_HOST_PORT}:${DATA_SERVICE_PORT}"
     volumes:
-      - "/data:/data:ro"
-      - "/opt/inference/cache:/app/cache"
+      - "${DATA_VOLUME_PATH}:/data:ro"
+      - "${CACHE_VOLUME_PATH}:/app/cache"
     depends_on:
       - p-1
     networks:
       - inference-network
-
-  # 根据需要添加更多服务...
 
 networks:
   inference-network:

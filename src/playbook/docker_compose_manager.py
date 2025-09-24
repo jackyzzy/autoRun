@@ -202,7 +202,8 @@ class DockerComposeManager:
                 node_name=node_name,
                 command_type="up",
                 file=service.compose_file,
-                services=[service.name]
+                services=[service.name],
+                env_file=".env"  # 使用节点上的.env文件
             )
 
             full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
@@ -326,14 +327,16 @@ class DockerComposeManager:
                 node_name=node_name,
                 command_type="stop",
                 file=service.compose_file,
-                services=[service.name]
+                services=[service.name],
+                env_file=".env"  # 使用节点上的.env文件
             )
 
             rm_cmd = self.node_manager.build_compose_command(
                 node_name=node_name,
                 command_type="rm",
                 file=service.compose_file,
-                services=[service.name]
+                services=[service.name],
+                env_file=".env"  # 使用节点上的.env文件
             )
 
             full_cmd = f"cd {node.docker_compose_path} && {stop_cmd.full_cmd} && {rm_cmd.full_cmd}"
@@ -423,7 +426,8 @@ class DockerComposeManager:
                 down_cmd = self.node_manager.build_compose_command(
                     node_name=node_name,
                     command_type="down",
-                    file="docker-compose.yml"
+                    file="docker-compose.yml",
+                    env_file=".env"  # 使用节点上的.env文件
                 )
 
                 # 添加--remove-orphans参数并允许失败

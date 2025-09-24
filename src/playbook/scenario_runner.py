@@ -289,6 +289,12 @@ class ScenarioRunner:
 
         logger.info("Using distributed deployment configuration")
 
+        logger.info("\n\nStep 0: Preparing scenario environment")
+        self._prepare_scenario_environment(scenario, result, logger)
+
+        logger.info("\n\nStep 0.5: Validating deployment prerequisites")
+        self._validate_deployment_prerequisites(scenario, result, logger)
+
         logger.info("\n\nStep 1: Validating deployment configuration")
         self._validate_deployment_config(scenario, result, logger)
 
@@ -331,6 +337,30 @@ class ScenarioRunner:
         
         logger.info(f"All {len(nodes)} nodes are connected and ready")
         
+        # 上传环境变量文件到节点（如果存在）
+        env_file_path = scenario.get_env_file_path()
+        if env_file_path:
+            logger.info("Uploading environment variables file to nodes")
+            upload_results = self.node_manager.upload_scenario_env_file(
+                env_file_path, scenario.name, node_names
+            )
+            
+            # 检查上传结果
+            failed_uploads = [node for node, success in upload_results.items() if not success]
+            if failed_uploads:
+                raise RuntimeError(f"Failed to upload environment file to nodes: {failed_uploads}")
+            
+            logger.info(f"Successfully uploaded .env file to {len(upload_results)} nodes")
+            
+            # 验证环境变量文件
+            verification_results = self.node_manager.verify_env_file_on_nodes(scenario.name, node_names)
+            failed_verifications = [node for node, result in verification_results.items() 
+                                  if not (result['exists'] and result['readable'])]
+            if failed_verifications:
+                logger.warning(f"Environment file verification failed on nodes: {failed_verifications}")
+        else:
+            logger.info("No environment variables file found for this scenario")
+        
         # 上传场景配置文件到节点（如果需要）
         config_file = scenario.get_test_config_path()
         if config_file:
@@ -340,6 +370,97 @@ class ScenarioRunner:
                 node_names
             )
             logger.info("Uploaded test configuration to nodes")
+    
+    def _validate_deployment_prerequisites(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
+        """验证部署前置条件 - 增强版验证"""
+        logger.info("Validating deployment prerequisites")
+        
+        nodes = self.node_manager.get_nodes(enabled_only=True)
+        node_names = [node.name for node in nodes]
+        prerequisite_failures = []
+        
+        for node in nodes:
+            logger.info(f"🔍 Validating prerequisites on node {node.name}...")
+            
+            # 1. 验证工作目录路径一致性
+            if node.work_dir != node.docker_compose_path:
+                logger.warning(f"⚠️  Path inconsistency on {node.name}: work_dir({node.work_dir}) != docker_compose_path({node.docker_compose_path})")
+            
+            # 2. 验证.env文件（如果场景需要）
+            env_file_path = scenario.get_env_file_path()
+            if env_file_path:
+                env_path = f"{node.docker_compose_path}/.env"
+                verify_env_cmd = f"test -f {env_path} && test -r {env_path} && wc -c {env_path} | cut -d' ' -f1"
+                
+                try:
+                    results = self.node_manager.execute_command(verify_env_cmd, [node.name], timeout=10)
+                    node_result = results.get(node.name)
+                    
+                    if node_result and node_result[0] == 0:
+                        remote_size = int(node_result[1].strip())
+                        local_size = Path(env_file_path).stat().st_size
+                        
+                        if remote_size == local_size:
+                            logger.info(f"✅ .env file validation passed on {node.name} ({remote_size} bytes)")
+                        else:
+                            error_msg = f".env file size mismatch on {node.name}: local={local_size}, remote={remote_size}"
+                            logger.error(f"❌ {error_msg}")
+                            prerequisite_failures.append(f"{node.name}: {error_msg}")
+                    else:
+                        error_msg = f".env file not found or not readable on {node.name}: {env_path}"
+                        logger.error(f"❌ {error_msg}")
+                        prerequisite_failures.append(f"{node.name}: {error_msg}")
+                        
+                except Exception as e:
+                    error_msg = f".env file validation failed on {node.name}: {e}"
+                    logger.error(f"❌ {error_msg}")
+                    prerequisite_failures.append(f"{node.name}: {error_msg}")
+            else:
+                logger.info(f"ℹ️  No .env file required for scenario {scenario.name}")
+            
+            # 3. 验证目录权限
+            perm_check_cmd = f"test -d {node.docker_compose_path} && test -w {node.docker_compose_path}"
+            try:
+                results = self.node_manager.execute_command(perm_check_cmd, [node.name], timeout=10)
+                node_result = results.get(node.name)
+                
+                if node_result and node_result[0] == 0:
+                    logger.info(f"✅ Directory permissions validated on {node.name}: {node.docker_compose_path}")
+                else:
+                    error_msg = f"Directory permission check failed on {node.name}: {node.docker_compose_path}"
+                    logger.error(f"❌ {error_msg}")
+                    prerequisite_failures.append(f"{node.name}: {error_msg}")
+                    
+            except Exception as e:
+                error_msg = f"Directory permission validation failed on {node.name}: {e}"
+                logger.error(f"❌ {error_msg}")
+                prerequisite_failures.append(f"{node.name}: {error_msg}")
+            
+            # 4. 验证Docker服务可用性
+            docker_check_cmd = "docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'FAIL'"
+            try:
+                results = self.node_manager.execute_command(docker_check_cmd, [node.name], timeout=15)
+                node_result = results.get(node.name)
+                
+                if node_result and node_result[0] == 0 and "FAIL" not in node_result[1]:
+                    docker_version = node_result[1].strip()
+                    logger.info(f"✅ Docker service validated on {node.name}: v{docker_version}")
+                else:
+                    error_msg = f"Docker service not available on {node.name}"
+                    logger.error(f"❌ {error_msg}")
+                    prerequisite_failures.append(f"{node.name}: {error_msg}")
+                    
+            except Exception as e:
+                error_msg = f"Docker service validation failed on {node.name}: {e}"
+                logger.warning(f"⚠️  {error_msg}")  # Warning instead of error since Docker might be temporarily unavailable
+        
+        # 报告验证结果
+        if prerequisite_failures:
+            failure_summary = "; ".join(prerequisite_failures)
+            logger.error(f"❌ Prerequisite validation failed: {failure_summary}")
+            raise RuntimeError(f"Deployment prerequisite validation failed: {failure_summary}")
+        else:
+            logger.info(f"✅ All deployment prerequisites validated successfully on {len(nodes)} nodes")
     
     
     def _stop_inference_services(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
@@ -356,7 +477,8 @@ class ScenarioRunner:
             compose_cmd = self.node_manager.build_compose_command(
                 node_name=node.name,
                 command_type="down",
-                file=compose_file
+                file=compose_file,
+                env_file=".env"  # 使用节点上的.env文件
             )
 
             full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
