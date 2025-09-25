@@ -3,7 +3,6 @@
 负责按顺序执行测试场景，管理场景生命周期
 """
 
-import os
 import time
 import logging
 import asyncio
@@ -11,7 +10,6 @@ from typing import Dict, List, Optional, Any, Callable
 from pathlib import Path
 from datetime import datetime, timedelta
 from enum import Enum
-import json
 
 from .scenario_manager import ScenarioManager, Scenario
 from .node_manager import NodeManager
@@ -23,7 +21,7 @@ from .scenario_resource_manager import ScenarioResourceManager
 from .concurrent_deployer import (
     ConcurrentServiceDeployer, ConcurrentDeploymentLogger, ConcurrentRetryStrategy
 )
-from ..utils.logger import setup_scenario_logger, LogCapture
+from ..utils.logger import setup_scenario_logger
 
 
 class ScenarioStatus(Enum):
@@ -266,7 +264,10 @@ class ScenarioRunner:
                 
                 if attempt < self.retry_count:
                     self.logger.warning(f"Scenario {scenario_name} failed, will retry: {error_msg}")
-                    time.sleep(30)  # 重试前等待
+                    
+                    # 重试前强制清理状态
+                    self._cleanup_before_retry(scenario_name, attempt + 1, scenario_logger)
+                    
                     continue
                 else:
                     result.fail(error_msg)
@@ -279,10 +280,55 @@ class ScenarioRunner:
         
         return result
     
+    def _cleanup_before_retry(self, _scenario_name: str, attempt: int, logger: logging.Logger):
+        """重试前清理状态和连接"""
+        logger.info("Cleaning up before retry...")
+        
+        try:
+            # 1. 强制清理SSH连接池
+            logger.info("Clearing SSH connections...")
+            from ..utils.ssh_client import ssh_pool
+            ssh_pool.close_all()
+            
+            # 2. 清理资源管理器状态
+            if hasattr(self, 'resource_manager'):
+                logger.info("Force cleaning resources...")
+                self.resource_manager.force_clean_environment()
+            
+            # 3. 清理节点管理器连通性缓存
+            if hasattr(self, 'node_manager'):
+                logger.info("Clearing node connectivity cache...")
+                self.node_manager.clear_connectivity_cache()
+                
+                # 4. 重新验证节点连通性（不使用缓存）
+                logger.info("Re-verifying node connectivity...")
+                connectivity = self.node_manager.test_connectivity(use_cache=False)
+                connected_count = sum(connectivity.values()) if isinstance(connectivity, dict) else 0
+                total_count = len(connectivity) if isinstance(connectivity, dict) else 0
+                
+                if connected_count < total_count:
+                    logger.warning(f"Node connectivity issues detected: {connected_count}/{total_count} nodes connected")
+                    for node_name, status in connectivity.items():
+                        if not status:
+                            logger.warning(f"Node {node_name} is not connected")
+                else:
+                    logger.info(f"All {total_count} nodes are connected")
+            
+            # 5. 添加指数退避重试延迟
+            retry_delay = min(30 * (2 ** (attempt - 1)), 120)  # 30s, 60s, 120s (最大2分钟)
+            logger.info(f"Waiting {retry_delay}s before retry attempt {attempt}...")
+            time.sleep(retry_delay)
+            
+            logger.info("Cleanup completed, ready for retry")
+            
+        except Exception as cleanup_error:
+            logger.error(f"Cleanup before retry failed: {cleanup_error}")
+            logger.warning("Proceeding with retry despite cleanup failure...")
+            # 即使清理失败也要继续重试，但至少等待基本延迟
+            time.sleep(30)
+    
     def _execute_scenario_steps(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """执行场景步骤（分布式部署流程）"""
-        scenario_path = Path(scenario.directory)
-
         # 验证必须配置
         if not scenario.metadata or not scenario.metadata.services:
             raise RuntimeError(f"Scenario {scenario.name} missing required services configuration")
@@ -376,7 +422,6 @@ class ScenarioRunner:
         logger.info("Validating deployment prerequisites")
         
         nodes = self.node_manager.get_nodes(enabled_only=True)
-        node_names = [node.name for node in nodes]
         prerequisite_failures = []
         
         for node in nodes:
@@ -595,6 +640,10 @@ class ScenarioRunner:
     def _validate_deployment_config(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """验证部署配置"""
         scenario_path = Path(scenario.directory)
+        
+        if not scenario.metadata:
+            raise RuntimeError(f"Scenario {scenario.name} missing metadata")
+        
         services = scenario.metadata.services
         
         logger.info(f"Validating deployment config for {len(services)} services")
@@ -613,6 +662,9 @@ class ScenarioRunner:
         
     def _build_service_dependencies(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """构建服务依赖图"""
+        if not scenario.metadata:
+            raise RuntimeError(f"Scenario {scenario.name} missing metadata")
+        
         services = scenario.metadata.services
         
         logger.info("Building service dependency graph")
@@ -647,7 +699,6 @@ class ScenarioRunner:
 
         # 获取超时配置
         deployment_timeout = concurrent_config.get('deployment_timeout', 600)
-        health_check_timeout = concurrent_config.get('health_check_timeout', 300)
 
         # 获取部署批次
         batches = self.dependency_resolver.get_deployment_batches()
@@ -695,6 +746,9 @@ class ScenarioRunner:
 
     def _run_comprehensive_health_checks(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """运行全面健康检查（支持并发）"""
+        if not scenario.metadata:
+            raise RuntimeError(f"Scenario {scenario.name} missing metadata")
+        
         services = scenario.metadata.services
 
         # 获取并发配置
@@ -732,6 +786,9 @@ class ScenarioRunner:
     
     def _execute_test_scripts(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """执行测试脚本"""
+        if not scenario.metadata:
+            raise RuntimeError(f"Scenario {scenario.name} missing metadata")
+        
         test_config = scenario.metadata.test_execution
         
         if not test_config.wait_for_all_services:
@@ -831,6 +888,10 @@ class ScenarioRunner:
     def _stop_distributed_services(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """停止分布式服务（支持并发）"""
         scenario_path = Path(scenario.directory)
+        
+        if not scenario.metadata:
+            raise RuntimeError(f"Scenario {scenario.name} missing metadata")
+        
         services = scenario.metadata.services
 
         # 获取并发配置
@@ -895,6 +956,9 @@ class ScenarioRunner:
 
     def _cleanup_distributed_environment(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
         """清理分布式环境"""
+        if not scenario.metadata:
+            raise RuntimeError(f"Scenario {scenario.name} missing metadata")
+        
         services = scenario.metadata.services
         
         logger.info("Cleaning up distributed environment")

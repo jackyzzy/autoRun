@@ -85,7 +85,7 @@ docker run -it --rm \
 
 **主要依赖包说明：**
 - `paramiko`: SSH连接和文件传输
-- `scp`: SCP文件传输优化（相比SFTP更高效）
+- `scp`: SCP文件传输优化（相比SFTP更高效且避免验证阻塞）
 - `click`: 命令行界面
 - `rich`: 美化输出和进度显示
 - `PyYAML`: 配置文件解析

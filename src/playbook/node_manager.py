@@ -464,11 +464,16 @@ class NodeManager:
         results = {}
         
         def upload_env_to_node(node_name: str) -> Tuple[str, bool]:
+            start_time = time.time()
+            
             try:
+                # 详细步骤日志
+                self.logger.info(f"[{node_name}] Step 1: Establishing connection...")
                 node = self.nodes[node_name]
                 client = node.get_ssh_client()
                 
                 # 🔧 增强: 检查路径一致性并选择最佳上传路径
+                self.logger.info(f"[{node_name}] Step 2: Determining target directory...")
                 if node.work_dir != node.docker_compose_path:
                     self.logger.warning(f"Path inconsistency on {node_name}: work_dir({node.work_dir}) != docker_compose_path({node.docker_compose_path})")
                     self.logger.info(f"Using docker_compose_path for {node_name}: {node.docker_compose_path}")
@@ -477,65 +482,159 @@ class NodeManager:
                     target_dir = node.work_dir
                 
                 remote_env_path = f"{target_dir}/.env"
+                self.logger.info(f"[{node_name}] Target path: {remote_env_path}")
                 
                 with client.connection_context():
                     # 🔧 增强: 确保目标目录存在
+                    self.logger.info(f"[{node_name}] Step 3: Preparing remote directory...")
+                    mkdir_start = time.time()
                     mkdir_result = client.execute_command(f"mkdir -p {target_dir}", check_exit_code=False)
-                    self.logger.debug(f"Created directory {target_dir} on {node_name}: exit_code={mkdir_result[0]}")
+                    mkdir_duration = time.time() - mkdir_start
+                    self.logger.info(f"[{node_name}] Directory creation: {mkdir_duration:.1f}s (exit_code: {mkdir_result[0]})")
                     
                     # 🔧 增强: 备份现有文件（如果存在）
+                    self.logger.info(f"[{node_name}] Step 4: Backing up existing file...")
+                    backup_start = time.time()
                     backup_cmd = f"test -f {remote_env_path} && cp {remote_env_path} {remote_env_path}.bak || true"
                     backup_result = client.execute_command(backup_cmd, check_exit_code=False)
-                    self.logger.debug(f"Backup existing .env on {node_name}: exit_code={backup_result[0]}")
+                    backup_duration = time.time() - backup_start
+                    self.logger.info(f"[{node_name}] Backup operation: {backup_duration:.1f}s (exit_code: {backup_result[0]})")
                     
                     # 上传环境变量文件
-                    self.logger.debug(f"Uploading .env to {node_name}:{remote_env_path}")
+                    self.logger.info(f"[{node_name}] Step 5: Starting file upload...")
+                    upload_start = time.time()
                     success = client.upload_file(env_file_path, remote_env_path)
+                    upload_duration = time.time() - upload_start
                     
                     if success:
+                        self.logger.info(f"[{node_name}] Upload completed in {upload_duration:.1f}s")
+                        
                         # 设置正确的文件权限
+                        self.logger.info(f"[{node_name}] Step 6: Setting file permissions...")
+                        chmod_start = time.time()
                         chmod_result = client.execute_command(f"chmod 644 {remote_env_path}", check_exit_code=False)
+                        chmod_duration = time.time() - chmod_start
+                        self.logger.info(f"[{node_name}] Permission setting: {chmod_duration:.1f}s (exit_code: {chmod_result[0]})")
                         
                         # 🔧 增强: 立即验证上传结果
+                        self.logger.info(f"[{node_name}] Step 7: Verifying upload...")
+                        verify_start = time.time()
                         verify_result = client.execute_command(f"test -f {remote_env_path} && wc -c {remote_env_path}", check_exit_code=False)
+                        verify_duration = time.time() - verify_start
+                        
                         if verify_result[0] == 0:
                             remote_size = int(verify_result[1].strip().split()[0])
+                            self.logger.info(f"[{node_name}] Size verification: {verify_duration:.1f}s (local: {local_file_info.st_size}, remote: {remote_size})")
+                            
                             if remote_size == local_file_info.st_size:
-                                self.logger.info(f"✅ Successfully uploaded and verified .env file for scenario '{scenario_name}' to {node_name}:{remote_env_path} ({remote_size} bytes)")
-                                
                                 # 🔧 增强: 验证文件可读性和内容
+                                self.logger.info(f"[{node_name}] Step 8: Content verification...")
+                                content_start = time.time()
                                 content_check = client.execute_command(f"head -1 {remote_env_path}", check_exit_code=False)
+                                content_duration = time.time() - content_start
+                                
                                 if content_check[0] == 0:
                                     first_line = content_check[1].strip()
+                                    self.logger.info(f"[{node_name}] Content check: {content_duration:.1f}s")
                                     self.logger.debug(f"Remote .env first line on {node_name}: {first_line[:50]}...")
                                 
+                                total_duration = time.time() - start_time
+                                self.logger.info(f"✅ [{node_name}] Upload successful in {total_duration:.1f}s total")
                                 return node_name, True
                             else:
-                                self.logger.error(f"❌ File size mismatch on {node_name}: local={local_file_info.st_size}, remote={remote_size}")
+                                total_duration = time.time() - start_time
+                                self.logger.error(f"❌ [{node_name}] File size mismatch after {total_duration:.1f}s: local={local_file_info.st_size}, remote={remote_size}")
                                 return node_name, False
                         else:
-                            self.logger.error(f"❌ Failed to verify uploaded .env file on {node_name}")
+                            total_duration = time.time() - start_time
+                            self.logger.error(f"❌ [{node_name}] Failed to verify uploaded file after {total_duration:.1f}s")
                             return node_name, False
                     else:
-                        self.logger.error(f"❌ Failed to upload .env file for scenario '{scenario_name}' to {node_name}")
+                        total_duration = time.time() - start_time
+                        self.logger.error(f"❌ [{node_name}] Upload failed after {upload_duration:.1f}s (total: {total_duration:.1f}s)")
                         return node_name, False
                         
             except Exception as e:
-                self.logger.error(f"❌ Failed to upload .env file to {node_name}: {e}")
+                total_duration = time.time() - start_time
+                self.logger.error(f"❌ [{node_name}] Upload failed after {total_duration:.1f}s with exception: {e}")
                 import traceback
                 self.logger.debug(f"Full traceback: {traceback.format_exc()}")
                 return node_name, False
         
-        # 并发上传
-        with ThreadPoolExecutor(max_workers=min(len(node_names), 5)) as executor:
-            future_to_node = {
-                executor.submit(upload_env_to_node, node_name): node_name
-                for node_name in node_names
-            }
+        # 添加总体超时控制
+        import signal
+        import time
+        
+        def timeout_handler(signum, frame):
+            self.logger.error("File upload timeout, forcing cleanup...")
+            ssh_pool.close_all()
+            raise TimeoutError("File upload timeout after 300 seconds")
+        
+        # 设置信号处理器（仅在支持的系统上）
+        old_handler = None
+        try:
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(300)  # 5分钟总超时
+        except (AttributeError, OSError):
+            self.logger.warning("Signal-based timeout not available, using manual monitoring")
+        
+        try:
+            # 优化: 上传前强制清理SSH连接池
+            self.logger.info("Clearing SSH connections before upload...")
+            ssh_pool.close_all()
             
-            for future in as_completed(future_to_node):
-                node_name, success = future.result()
-                results[node_name] = success
+            # 优化: 减少并发度，避免连接冲突
+            max_workers = min(len(node_names), 2)  # 从5减到2
+            self.logger.debug(f"Using {max_workers} concurrent workers for upload")
+            
+            # 根据节点数量选择上传策略
+            if len(node_names) <= 2:
+                # 小规模顺序上传，更稳定
+                self.logger.info("Using sequential upload for better reliability")
+                for node_name in node_names:
+                    try:
+                        self.logger.info(f"Uploading to {node_name}...")
+                        start_time = time.time()
+                        result = upload_env_to_node(node_name)
+                        duration = time.time() - start_time
+                        results[result[0]] = result[1]
+                        
+                        if result[1]:
+                            self.logger.info(f"✅ {node_name}: Upload completed in {duration:.1f}s")
+                        else:
+                            self.logger.error(f"❌ {node_name}: Upload failed after {duration:.1f}s")
+                            # 失败时立即清理连接
+                            self._cleanup_node_connection(node_name)
+                            
+                    except Exception as e:
+                        self.logger.error(f"Upload failed for {node_name}: {e}")
+                        results[node_name] = False
+                        self._cleanup_node_connection(node_name)
+            else:
+                # 并发上传（节点较多时）
+                self.logger.info(f"Using concurrent upload with {max_workers} workers")
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_node = {
+                        executor.submit(upload_env_to_node, node_name): node_name
+                        for node_name in node_names
+                    }
+                    
+                    for future in as_completed(future_to_node):
+                        node_name, success = future.result()
+                        results[node_name] = success
+                        
+                        if not success:
+                            # 失败时清理连接
+                            self._cleanup_node_connection(node_name)
+                            
+        finally:
+            # 恢复信号处理器
+            if old_handler is not None:
+                try:
+                    signal.alarm(0)  # 取消超时
+                    signal.signal(signal.SIGALRM, old_handler)
+                except (AttributeError, OSError):
+                    pass
         
         success_count = sum(results.values())
         failed_nodes = [name for name, success in results.items() if not success]
@@ -667,6 +766,18 @@ class NodeManager:
                 results[node_name] = status
         
         return results
+    
+    def _cleanup_node_connection(self, node_name: str):
+        """清理指定节点的连接"""
+        try:
+            node = self.nodes.get(node_name)
+            if node:
+                client = node.get_ssh_client()
+                if client:
+                    client.disconnect()
+                    self.logger.debug(f"Cleaned up connection for {node_name}")
+        except Exception as e:
+            self.logger.warning(f"Failed to cleanup connection for {node_name}: {e}")
     
     def close_all_connections(self):
         """关闭所有SSH连接"""

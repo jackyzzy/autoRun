@@ -175,7 +175,7 @@ class ServiceDependencyResolver:
         return batches
     
     def wait_for_service_ready(self, service_name: str, node_names: List[str],
-                              timeout: int = 300) -> bool:
+                              timeout: int = 200) -> bool:
         """🏥 等待服务在指定节点上就绪 - 智能健康检查
 
         🎯 改进机制：

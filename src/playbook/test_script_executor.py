@@ -295,11 +295,16 @@ class TestScriptExecutor:
                     if upload_attempt > 0:
                         self.logger.info(f"Upload retry attempt {upload_attempt + 1}/{max_upload_retries}")
 
-                    # 如果是重试，先清理可能存在的损坏文件
+                    # 如果是重试，只清理可能卡死的SSH连接
                     if upload_attempt > 0:
-                        cleanup_cmd = f"rm -f {remote_script_path}"
-                        self.node_manager.execute_command(cleanup_cmd, [node_name], timeout=10)
-                        time.sleep(1)  # 短暂延迟
+                        try:
+                            node_obj = self.node_manager.get_node(node_name)
+                            if node_obj:
+                                client = node_obj.get_ssh_client()
+                                client.disconnect()
+                        except Exception:
+                            pass
+                        time.sleep(2)  # 增加延迟到2秒
 
                     upload_success = self.node_manager.upload_file(
                         str(script_path), remote_script_path, [node_name]
@@ -515,8 +520,11 @@ class TestScriptExecutor:
 
     def _verify_remote_script(self, node_name: str, remote_script_path: str, expected_size: int, expected_hash: str = None) -> dict:
         """验证远程脚本文件的完整性"""
+        start_time = time.time()
+        
         try:
             # 第一层：检查文件是否存在且获取大小
+            self.logger.info(f"[{node_name}] Step 1: Checking file existence...")
             check_cmd = f"test -f {remote_script_path} && stat -f%z {remote_script_path} 2>/dev/null || stat -c%s {remote_script_path} 2>/dev/null"
             results = self.node_manager.execute_command(check_cmd, [node_name], timeout=10)
 
@@ -544,9 +552,14 @@ class TestScriptExecutor:
             if remote_size == 0:
                 return {"success": False, "error": "Script file is empty"}
 
-            self.logger.info(f"Size verification passed: {remote_size} bytes")
+            self.logger.info(f"[{node_name}] Step 2: Size verification passed: {remote_size} bytes")
+
+            # 检查验证是否超时
+            if time.time() - start_time > 20:  # 20秒超时
+                return {"success": False, "error": "Verification timeout"}
 
             # 第二层：MD5 哈希验证（如果提供了期望的哈希值）
+            self.logger.info(f"[{node_name}] Step 3: Computing MD5 hash...")
             if expected_hash:
                 hash_cmd = f"md5sum {remote_script_path} 2>/dev/null | cut -d' ' -f1 || openssl dgst -md5 {remote_script_path} | cut -d' ' -f2"
                 hash_results = self.node_manager.execute_command(hash_cmd, [node_name], timeout=10)
@@ -561,11 +574,16 @@ class TestScriptExecutor:
                                 "success": False,
                                 "error": f"MD5 hash mismatch: expected {expected_hash}, got {remote_hash}"
                             }
-                        self.logger.info(f"MD5 verification passed: {remote_hash}")
+                        self.logger.info(f"[{node_name}] MD5 verification passed: {remote_hash}")
                     else:
-                        self.logger.warning(f"Failed to calculate remote MD5: {hash_stderr}")
+                        self.logger.warning(f"[{node_name}] Failed to calculate remote MD5: {hash_stderr}")
+
+            # 再次检查验证是否超时
+            if time.time() - start_time > 20:  # 20秒超时
+                return {"success": False, "error": "Verification timeout"}
 
             # 第三层：脚本内容验证
+            self.logger.info(f"[{node_name}] Step 4: Validating file content...")
             head_cmd = f"head -5 {remote_script_path}"
             head_results = self.node_manager.execute_command(head_cmd, [node_name], timeout=5)
             head_result = head_results.get(node_name)

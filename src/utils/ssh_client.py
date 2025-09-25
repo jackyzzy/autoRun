@@ -82,7 +82,14 @@ class SSHClient:
         if self.client:
             self.client.close()
             self.client = None
-        self.logger.info(f"Disconnected from {self.host}")
+        
+        # 安全的日志记录，避免在Python解释器关闭时出错
+        try:
+            if hasattr(self, 'logger') and self.logger and hasattr(logging, 'FileHandler'):
+                self.logger.info(f"Disconnected from {self.host}")
+        except (AttributeError, ImportError, TypeError):
+            # 在程序关闭时，日志系统可能已经被清理，忽略日志错误
+            pass
     
     def is_connected(self) -> bool:
         """检查是否已连接"""
@@ -92,6 +99,20 @@ class SSHClient:
             transport = self.client.get_transport()
             return transport and transport.is_active()
         except:
+            return False
+    
+    def _verify_connection_active(self) -> bool:
+        """验证连接是否真正可用（不依赖缓存）"""
+        if not self.client:
+            return False
+            
+        try:
+            # 发送轻量级命令测试连接
+            stdin, stdout, stderr = self.client.exec_command('echo "ping"', timeout=5)
+            result = stdout.read().decode().strip()
+            return result == "ping"
+        except Exception as e:
+            self.logger.debug(f"Connection verification failed: {e}")
             return False
     
     def execute_command(self, command: str, timeout: int = 300, 
@@ -201,15 +222,27 @@ class SSHClient:
             raise SSHExecutionError(f"Hash calculation failed: {e}")
 
     def _cleanup_failed_upload(self, remote_path: str) -> None:
-        """清理上传失败的远程文件"""
+        """清理上传失败的远程文件并断开连接"""
         try:
             if self.sftp:
                 self.sftp.remove(remote_path)
                 self.logger.info(f"Cleaned up corrupted remote file: {remote_path}")
         except Exception as cleanup_error:
             self.logger.warning(f"Failed to cleanup corrupted remote file {remote_path}: {cleanup_error}")
+        
+        # 失败后立即断开连接，避免使用损坏的连接
+        self.disconnect()
 
-    def _sftp_put_with_timeout(self, local_path: str, remote_path: str, timeout: int = 120) -> None:
+    def _fallback_verification(self, remote_path: str) -> bool:
+        """降级验证：只检查文件是否存在且非空"""
+        try:
+            cmd = f"test -f {remote_path} && test -s {remote_path}"
+            exit_code, _, _ = self.execute_command(cmd, timeout=5, check_exit_code=False)
+            return exit_code == 0
+        except Exception:
+            return False
+
+    def _sftp_put_with_timeout(self, local_path: str, remote_path: str, timeout: int = 60) -> None:
         """使用线程包装sftp.put以实现超时控制。
 
         如果在timeout秒内未完成，则尝试关闭transport以中断阻塞的sftp操作。
@@ -257,7 +290,7 @@ class SSHClient:
         if 'exc' in exception_holder:
             raise exception_holder['exc']
 
-    def _scp_put_with_timeout(self, local_path: str, remote_path: str, timeout: int = 120) -> None:
+    def _scp_put_with_timeout(self, local_path: str, remote_path: str, timeout: int = 60) -> None:
         """使用 SCPClient 上传文件并提供超时保护。
 
         要求安装 `scp` 包（pip install scp）。如果未安装，会抛出 SSHExecutionError 指示用户安装。
@@ -314,9 +347,12 @@ class SSHClient:
         if 'exc' in exception_holder:
             raise exception_holder['exc']
 
-    def upload_file(self, local_path: str, remote_path: str, method: str = 'scp', timeout: int = 120) -> bool:
+    def upload_file(self, local_path: str, remote_path: str, method: str = 'scp', timeout: int = 60) -> bool:
         """上传文件到远程服务器"""
-        if not self.is_connected():
+        # 强制验证连接状态，不使用缓存
+        if not self._verify_connection_active():
+            self.logger.warning("Connection not active, reconnecting...")
+            self.disconnect()
             self.connect()
             
         try:
@@ -352,13 +388,53 @@ class SSHClient:
                 else:
                     raise SSHExecutionError(f"Failed during {method} upload: {put_err}")
 
-            # 分层验证上传结果
+            # 分层验证上传结果（根据上传方法选择验证方式）
+            import time
+            
+            verification_start_time = time.time()
+            
             try:
-                # 第一层：快速大小检查
+                # 获取本地文件大小
                 local_size = os.path.getsize(local_path)
-                remote_stat = self.sftp.stat(remote_path)
-                remote_size = remote_stat.st_size
 
+                # 根据上传方法选择验证方式
+                if method.lower() == 'scp':
+                    # SCP上传使用SSH命令验证，避免SFTP阻塞
+                    self.logger.info("Using SSH command verification for SCP upload")
+                    
+                    # 使用SSH命令获取远程文件大小
+                    size_cmd = f"test -f {remote_path} && stat -c%s {remote_path} 2>/dev/null || stat -f%z {remote_path} 2>/dev/null"
+                    exit_code, size_output, stderr = self.execute_command(size_cmd, timeout=10, check_exit_code=False)
+                    
+                    if exit_code != 0:
+                        self.logger.error(f"Failed to get remote file size via SSH: {stderr}")
+                        # 回退到基本验证
+                        if self._fallback_verification(remote_path):
+                            self.logger.info(f"Fallback verification passed for {remote_path}")
+                            return True
+                        else:
+                            self._cleanup_failed_upload(remote_path)
+                            raise SSHExecutionError(f"File upload verification failed: cannot verify remote file")
+                    
+                    try:
+                        remote_size = int(size_output.strip())
+                    except ValueError:
+                        self.logger.error(f"Invalid remote file size response: {size_output.strip()}")
+                        # 回退到基本验证
+                        if self._fallback_verification(remote_path):
+                            self.logger.info(f"Fallback verification passed for {remote_path}")
+                            return True
+                        else:
+                            self._cleanup_failed_upload(remote_path)
+                            raise SSHExecutionError(f"File upload verification failed: invalid size response")
+
+                else:
+                    # SFTP上传使用SFTP验证
+                    self.logger.info("Using SFTP verification for SFTP upload")
+                    remote_stat = self.sftp.stat(remote_path)
+                    remote_size = remote_stat.st_size
+
+                # 验证文件大小
                 if local_size != remote_size:
                     self.logger.error(f"File size mismatch after upload: local={local_size}, remote={remote_size}")
                     self._cleanup_failed_upload(remote_path)
@@ -366,24 +442,26 @@ class SSHClient:
 
                 self.logger.info(f"Size verification passed: {local_size} bytes")
 
-                # 第二层：MD5 哈希完整性验证
+                # 检查验证是否超时（30秒）
+                if time.time() - verification_start_time > 30:
+                    self.logger.warning("File verification timeout, attempting fallback verification")
+                    if self._fallback_verification(remote_path):
+                        self.logger.info(f"Fallback verification passed for {remote_path}")
+                        return True
+                    else:
+                        self._cleanup_failed_upload(remote_path)
+                        raise SSHExecutionError(f"File upload verification failed: timeout and fallback failed")
+
+                # 第二层：MD5 哈希完整性验证（使用SSH命令，避免SFTP阻塞）
                 local_hash = self.calculate_file_hash(local_path, 'md5')
 
                 # 在远程计算 MD5
                 hash_cmd = f"md5sum {remote_path} 2>/dev/null | cut -d' ' -f1 || openssl dgst -md5 {remote_path} | cut -d' ' -f2"
-                exit_code, remote_hash_output, stderr = self.execute_command(hash_cmd, timeout=30, check_exit_code=False)
+                exit_code, remote_hash_output, stderr = self.execute_command(hash_cmd, timeout=10, check_exit_code=False)
 
                 if exit_code != 0:
-                    self.logger.warning(f"Failed to calculate remote MD5, fallback to basic verification: {stderr}")
-                    # 回退到基本的可读性检查
-                    try:
-                        with self.sftp.open(remote_path, 'r') as remote_file:
-                            remote_file.read(100)
-                        self.logger.info(f"Upload verification: file {remote_path} appears readable")
-                    except Exception as read_error:
-                        self.logger.error(f"Upload verification failed: cannot read remote file {remote_path}: {read_error}")
-                        self._cleanup_failed_upload(remote_path)
-                        raise SSHExecutionError(f"File upload failed: remote file is not readable: {read_error}")
+                    self.logger.warning(f"Failed to calculate remote MD5, skipping hash verification: {stderr}")
+                    self.logger.info(f"Upload verification completed with size check only")
                 else:
                     remote_hash = remote_hash_output.strip()
 
@@ -473,7 +551,11 @@ class SSHClient:
         pass  # 保持连接，由连接池管理
     
     def __del__(self):
-        self.disconnect()
+        try:
+            self.disconnect()
+        except Exception:
+            # 在Python解释器关闭时，忽略清理错误
+            pass
 
 
 class SSHConnectionPool:
