@@ -24,12 +24,16 @@ from typing import Dict, List, Optional, Any, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
 from pathlib import Path
+from datetime import datetime, timedelta
 
 from ..utils.ssh_client import SSHClient, ssh_pool, SSHConnectionError, SSHExecutionError
 from ..utils.docker_compose_adapter import DockerComposeAdapterManager, ComposeCommand
 from ..utils.common import (
     setup_module_logger, load_yaml_config, validate_required_fields,
     retry_on_failure, ContextTimer
+)
+from ..utils.exception_handler import (
+    with_exception_handling, node_operation, safe_execute, exception_context
 )
 
 
@@ -114,6 +118,11 @@ class NodeManager:
         self.nodes: Dict[str, Node] = {}
         self.config_file = config_file
 
+        # 连通性缓存配置
+        self.connectivity_cache: Dict[str, Tuple[bool, datetime]] = {}
+        self.connectivity_cache_ttl = 300  # 缓存TTL: 5分钟
+        self.connectivity_cache_enabled = True
+
         # 初始化Docker Compose适配器管理器
         self.compose_adapter_manager = DockerComposeAdapterManager(self.execute_command)
 
@@ -192,40 +201,85 @@ class NodeManager:
         """获取节点名称列表"""
         return [node.name for node in self.get_nodes(**kwargs)]
     
+    @with_exception_handling("connectivity testing", return_on_error={})
     def test_connectivity(self, node_names: Optional[List[str]] = None, 
-                         timeout: int = 10) -> Dict[str, bool]:
-        """测试节点连接性"""
+                         timeout: int = 10, force_refresh: bool = False) -> Dict[str, bool]:
+        """测试节点连接性（支持缓存优化）
+        
+        Args:
+            node_names: 要测试的节点名称列表
+            timeout: 连接超时时间
+            force_refresh: 是否强制刷新缓存
+            
+        Returns:
+            节点名称到连接状态的映射
+        """
         if node_names is None:
             node_names = list(self.nodes.keys())
         
+        current_time = datetime.now()
         results = {}
+        nodes_to_test = []
         
-        def test_node(node_name: str) -> Tuple[str, bool]:
-            try:
-                node = self.nodes[node_name]
-                client = node.get_ssh_client()
-                with client.connection_context():
-                    # 执行简单命令测试连接
-                    exit_code, _, _ = client.execute_command("echo 'test'", timeout=timeout)
-                    return node_name, exit_code == 0
-            except Exception as e:
-                self.logger.error(f"Connectivity test failed for {node_name}: {e}")
-                return node_name, False
-        
-        # 并发测试连接
-        with ThreadPoolExecutor(max_workers=min(len(node_names), 10)) as executor:
-            future_to_node = {
-                executor.submit(test_node, node_name): node_name 
-                for node_name in node_names
-            }
+        # 检查缓存
+        if self.connectivity_cache_enabled and not force_refresh:
+            cache_hits = 0
+            for node_name in node_names:
+                if node_name in self.connectivity_cache:
+                    cached_result, cached_time = self.connectivity_cache[node_name]
+                    # 检查缓存是否过期
+                    if (current_time - cached_time).total_seconds() < self.connectivity_cache_ttl:
+                        results[node_name] = cached_result
+                        cache_hits += 1
+                        continue
+                
+                # 缓存未命中或已过期，加入待测试列表
+                nodes_to_test.append(node_name)
             
-            for future in as_completed(future_to_node):
-                node_name, is_connected = future.result()
-                results[node_name] = is_connected
+            if cache_hits > 0:
+                self.logger.debug(f"Connectivity cache hits: {cache_hits}/{len(node_names)} nodes")
+        else:
+            nodes_to_test = node_names
+        
+        # 对需要测试的节点进行连通性检查
+        if nodes_to_test:
+            def test_node(node_name: str) -> Tuple[str, bool]:
+                try:
+                    node = self.nodes[node_name]
+                    client = node.get_ssh_client()
+                    with client.connection_context():
+                        # 执行简单命令测试连接
+                        exit_code, _, _ = client.execute_command("echo 'test'", timeout=timeout)
+                        return node_name, exit_code == 0
+                except Exception as e:
+                    self.logger.error(f"Connectivity test failed for {node_name}: {e}")
+                    return node_name, False
+            
+            # 并发测试连接
+            with ThreadPoolExecutor(max_workers=min(len(nodes_to_test), 10)) as executor:
+                future_to_node = {
+                    executor.submit(test_node, node_name): node_name 
+                    for node_name in nodes_to_test
+                }
+                
+                for future in as_completed(future_to_node):
+                    node_name, is_connected = future.result()
+                    results[node_name] = is_connected
+                    
+                    # 更新缓存
+                    if self.connectivity_cache_enabled:
+                        self.connectivity_cache[node_name] = (is_connected, current_time)
         
         # 记录结果
         connected_count = sum(results.values())
-        self.logger.info(f"Connectivity test: {connected_count}/{len(node_names)} nodes connected")
+        total_nodes = len(node_names)
+        cache_used = len(node_names) - len(nodes_to_test)
+        
+        if cache_used > 0:
+            self.logger.info(f"Connectivity test: {connected_count}/{total_nodes} nodes connected "
+                           f"({cache_used} from cache, {len(nodes_to_test)} tested)")
+        else:
+            self.logger.info(f"Connectivity test: {connected_count}/{total_nodes} nodes connected")
         
         return results
     
@@ -283,6 +337,7 @@ class NodeManager:
         
         return results
     
+    @with_exception_handling("file upload", return_on_error={})
     def upload_file(self, local_path: str, remote_path: str,
                    node_names: Optional[List[str]] = None) -> Dict[str, bool]:
         """上传文件到节点"""
@@ -382,6 +437,7 @@ class NodeManager:
         
         return results
     
+    @with_exception_handling("scenario env file upload", return_on_error={})
     def upload_scenario_env_file(self, env_file_path: str, scenario_name: str,
                                 node_names: Optional[List[str]] = None) -> Dict[str, bool]:
         """增强版scenario环境变量文件上传
@@ -617,6 +673,65 @@ class NodeManager:
         ssh_pool.close_all()
         self.logger.info("Closed all SSH connections")
     
+    def clear_connectivity_cache(self, node_names: Optional[List[str]] = None):
+        """清理连通性缓存
+        
+        Args:
+            node_names: 要清理的节点名称列表，为空则清理全部缓存
+        """
+        if node_names is None:
+            self.connectivity_cache.clear()
+            self.logger.info("Cleared all connectivity cache")
+        else:
+            for node_name in node_names:
+                self.connectivity_cache.pop(node_name, None)
+            self.logger.info(f"Cleared connectivity cache for nodes: {node_names}")
+    
+    def get_connectivity_cache_stats(self) -> Dict[str, Any]:
+        """获取连通性缓存统计信息"""
+        current_time = datetime.now()
+        valid_entries = 0
+        expired_entries = 0
+        
+        for node_name, (result, cache_time) in self.connectivity_cache.items():
+            if (current_time - cache_time).total_seconds() < self.connectivity_cache_ttl:
+                valid_entries += 1
+            else:
+                expired_entries += 1
+        
+        return {
+            'enabled': self.connectivity_cache_enabled,
+            'ttl_seconds': self.connectivity_cache_ttl,
+            'total_entries': len(self.connectivity_cache),
+            'valid_entries': valid_entries,
+            'expired_entries': expired_entries,
+            'cache_hit_potential': f"{(valid_entries / len(self.nodes) * 100):.1f}%" if self.nodes else "0%"
+        }
+    
+    def set_connectivity_cache_ttl(self, ttl_seconds: int):
+        """设置连通性缓存TTL
+        
+        Args:
+            ttl_seconds: 缓存有效时间（秒）
+        """
+        old_ttl = self.connectivity_cache_ttl
+        self.connectivity_cache_ttl = ttl_seconds
+        self.logger.info(f"Updated connectivity cache TTL: {old_ttl}s -> {ttl_seconds}s")
+    
+    def enable_connectivity_cache(self, enabled: bool = True):
+        """启用或禁用连通性缓存
+        
+        Args:
+            enabled: 是否启用缓存
+        """
+        old_state = self.connectivity_cache_enabled
+        self.connectivity_cache_enabled = enabled
+        
+        if not enabled:
+            self.clear_connectivity_cache()
+        
+        self.logger.info(f"Connectivity cache: {'enabled' if enabled else 'disabled'} (was {'enabled' if old_state else 'disabled'})")
+    
     def get_summary(self) -> Dict[str, Any]:
         """获取节点管理器摘要信息"""
         total_nodes = len(self.nodes)
@@ -635,7 +750,8 @@ class NodeManager:
             'disabled_nodes': total_nodes - enabled_nodes,
             'roles': roles,
             'tags': sorted(list(tags)),
-            'connection_pool_size': ssh_pool.get_connection_count()
+            'connection_pool_size': ssh_pool.get_connection_count(),
+            'connectivity_cache': self.get_connectivity_cache_stats()
         }
 
     def build_compose_command(self, node_name: str, command_type: str, **kwargs) -> ComposeCommand:

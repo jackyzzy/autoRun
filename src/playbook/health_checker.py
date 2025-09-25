@@ -14,6 +14,7 @@ from enum import Enum
 
 from .node_manager import NodeManager
 from .docker_manager import DockerComposeManager, ServiceStatus
+from ..utils.exception_handler import with_exception_handling, health_check
 
 
 class HealthStatus(Enum):
@@ -256,6 +257,7 @@ class HealthChecker:
         self._log_health_summary(results)
         return results
     
+    @health_check(return_on_error=False)
     def _check_node_connectivity(self) -> bool:
         """检查节点连接性"""
         try:
