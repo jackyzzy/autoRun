@@ -430,8 +430,8 @@ class DockerComposeManager:
                     env_file=".env"  # 使用节点上的.env文件
                 )
 
-                # 添加--remove-orphans参数并允许失败
-                full_cmd = down_cmd.full_cmd + " --remove-orphans || true"
+                # 允许失败但不清理孤立容器（保护手动运行的容器）
+                full_cmd = down_cmd.full_cmd + " || true"
 
                 # 在当前节点执行命令
                 results = self.node_manager.execute_command(full_cmd, [node_name], timeout=120)

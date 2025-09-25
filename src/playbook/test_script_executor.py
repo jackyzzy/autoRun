@@ -459,6 +459,7 @@ class TestScriptExecutor:
             for result_path in result_paths:
                 try:
                     # 下载文件
+                    # TODO: 此处传进来的是目录，但是实际上下载的时候校验的是文件导致下载错误
                     download_results = self.node_manager.download_files(
                         result_path,
                         str(local_result_dir),

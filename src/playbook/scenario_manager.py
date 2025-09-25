@@ -52,6 +52,10 @@ class ServiceHealthCheck:
         # 创建实例，只传入dataclass定义的字段
         instance_data = {k: v for k, v in merged_config.items() if k in cls.__dataclass_fields__}
         return cls(**instance_data)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """序列化为字典，只包含非None值"""
+        return {k: v for k, v in self.__dict__.items() if v is not None}
 
 
 @dataclass 
@@ -70,6 +74,16 @@ class ServiceDeployment:
         service = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
         service.health_check = ServiceHealthCheck.from_dict(health_check_data, global_defaults)
         return service
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """序列化为字典"""
+        return {
+            'name': self.name,
+            'compose_file': self.compose_file,
+            'nodes': self.nodes,
+            'depends_on': self.depends_on,
+            'health_check': self.health_check.to_dict()
+        }
 
 
 @dataclass
@@ -105,6 +119,10 @@ class TestExecution:
         # 创建实例，只传入dataclass定义的字段
         instance_data = {k: v for k, v in merged_config.items() if k in cls.__dataclass_fields__}
         return cls(**instance_data)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """序列化为字典，只包含非None值"""
+        return {k: v for k, v in self.__dict__.items() if v is not None}
 
 
 @dataclass
@@ -283,10 +301,10 @@ class ScenarioMetadata:
 
         # 使用新格式：直接包含services和test_execution
         if self.services:
-            result['services'] = [service.__dict__ for service in self.services]
+            result['services'] = [service.to_dict() for service in self.services]
 
         if self.test_execution.node != "local" or self.test_execution.script != "run_test.sh":
-            result['test_execution'] = self.test_execution.__dict__
+            result['test_execution'] = self.test_execution.to_dict()
             
         return result
 

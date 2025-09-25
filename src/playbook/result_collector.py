@@ -502,48 +502,6 @@ class ResultCollector:
         
         return collected_files
     
-    def _collect_files_from_single_node(self, node, remote_path: str, local_dir: str) -> List[str]:
-        """从单个节点收集文件"""
-        collected_files = []
-        
-        client = node.get_ssh_client()
-        
-        with client.connection_context():
-            # 检查远程路径是否存在
-            if not client.directory_exists(remote_path):
-                self.logger.warning(f"Remote path does not exist on {node.name}: {remote_path}")
-                return []
-            
-            # 列出远程文件
-            list_cmd = f"find {remote_path} -type f -name '*.json' -o -name '*.csv' -o -name '*.log' -o -name '*.txt' | head -100"
-            exit_code, stdout, stderr = client.execute_command(list_cmd, timeout=60, check_exit_code=False)
-            
-            if exit_code != 0:
-                self.logger.warning(f"Failed to list files on {node.name}: {stderr}")
-                return []
-            
-            remote_files = [f.strip() for f in stdout.strip().split('\n') if f.strip()]
-            
-            # 下载每个文件
-            for remote_file in remote_files:
-                try:
-                    # 计算本地文件路径
-                    relative_path = os.path.relpath(remote_file, remote_path)
-                    local_file = Path(local_dir) / relative_path
-                    local_file.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    # 下载文件
-                    success = client.download_file(remote_file, str(local_file))
-                    if success:
-                        collected_files.append(str(local_file))
-                        self.logger.debug(f"Downloaded: {remote_file} -> {local_file}")
-                    else:
-                        self.logger.warning(f"Failed to download: {remote_file}")
-                        
-                except Exception as e:
-                    self.logger.error(f"Error downloading {remote_file}: {e}")
-        
-        return collected_files
     
     def _save_test_metadata(self, result_dir: Path, test_results: Dict[str, TestResult]):
         """保存测试元数据"""

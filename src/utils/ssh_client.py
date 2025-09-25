@@ -347,6 +347,63 @@ class SSHClient:
         if 'exc' in exception_holder:
             raise exception_holder['exc']
 
+    def _scp_get_with_timeout(self, remote_path: str, local_path: str, timeout: int = 60) -> None:
+        """使用 SCPClient 下载文件并提供超时保护。
+
+        要求安装 `scp` 包（pip install scp）。如果未安装，会抛出 SSHExecutionError 指示用户安装。
+        """
+        if not _HAS_SCP or SCPClient is None:
+            raise SSHExecutionError("scp download requires the 'scp' package. Install with: pip install scp")
+
+        exception_holder = {}
+
+        def target():
+            scp = None
+            try:
+                # 通过 paramiko transport 创建 SCPClient
+                transport = self.client.get_transport()
+                scp = SCPClient(transport)
+                # 下载文件：remote_path -> local_path
+                scp.get(remote_path, local_path)
+            except Exception as e:
+                exception_holder['exc'] = e
+            finally:
+                try:
+                    if scp:
+                        scp.close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(timeout)
+
+        if thread.is_alive():
+            self.logger.error(f"scp.get timed out after {timeout}s, attempting to abort by closing transport")
+            try:
+                if self.client:
+                    transport = self.client.get_transport()
+                    if transport:
+                        transport.close()
+                        self.logger.debug("Closed transport to abort stalled scp.get")
+            except Exception as close_err:
+                self.logger.warning(f"Error while closing transport after scp.get timeout: {close_err}")
+
+            thread.join(2)
+
+            # 清理sftp引用（scp使用相同transport）
+            try:
+                if self.sftp:
+                    self.sftp.close()
+            except Exception:
+                pass
+            self.sftp = None
+
+            raise SSHExecutionError(f"scp.get timed out after {timeout} seconds and transport was closed")
+
+        if 'exc' in exception_holder:
+            raise exception_holder['exc']
+
     def upload_file(self, local_path: str, remote_path: str, method: str = 'scp', timeout: int = 60) -> bool:
         """上传文件到远程服务器"""
         # 强制验证连接状态，不使用缓存
@@ -490,22 +547,68 @@ class SSHClient:
             self.logger.error(f"Failed to upload file: {e}")
             raise SSHExecutionError(f"Failed to upload {local_path}: {e}")
     
-    def download_file(self, remote_path: str, local_path: str) -> bool:
+    def download_file(self, remote_path: str, local_path: str, method: str = 'scp', timeout: int = 60) -> bool:
         """从远程服务器下载文件"""
-        if not self.is_connected():
+        # 强制验证连接状态，不使用缓存
+        if not self._verify_connection_active():
+            self.logger.warning("Connection not active, reconnecting...")
+            self.disconnect()
             self.connect()
             
         try:
-            if not self.sftp:
-                self.sftp = self.client.open_sftp()
-                
+            # 预检查远程文件是否存在
+            if not self.file_exists(remote_path):
+                self.logger.error(f"Remote file does not exist: {remote_path}")
+                raise SSHExecutionError(f"Remote file does not exist: {remote_path}")
+            
             # 确保本地目录存在
             local_dir = os.path.dirname(local_path)
             if local_dir:
                 os.makedirs(local_dir, exist_ok=True)
             
-            self.sftp.get(remote_path, local_path)
-            self.logger.info(f"Downloaded {remote_path} to {local_path}")
+            self.logger.info(f"Downloading {remote_path} to {local_path} start ...")
+            
+            # 下载文件：支持 'sftp'（传统）和 'scp'（推荐）
+            try:
+                if method.lower() == 'scp':
+                    # 使用带超时的scp get，避免长时间阻塞
+                    self._scp_get_with_timeout(remote_path, local_path, timeout=timeout)
+                    self.logger.info("Using SCP for download (recommended)")
+                elif method.lower() == 'sftp':
+                    # 使用传统的SFTP下载
+                    if not self.sftp:
+                        self.sftp = self.client.open_sftp()
+                    self.sftp.get(remote_path, local_path)
+                    self.logger.info("Using SFTP for download")
+                else:
+                    raise SSHExecutionError(f"Unknown download method: {method}")
+            except Exception as download_err:
+                self.logger.error(f"File download failed ({method}): {download_err}")
+                # 清理可能创建的不完整本地文件
+                try:
+                    if os.path.exists(local_path):
+                        os.remove(local_path)
+                        self.logger.debug(f"Cleaned up incomplete local file: {local_path}")
+                except Exception:
+                    pass
+                
+                # 统一包装异常
+                if isinstance(download_err, SSHExecutionError):
+                    raise
+                else:
+                    raise SSHExecutionError(f"Failed during {method} download: {download_err}")
+            
+            # 验证下载结果
+            if not os.path.exists(local_path):
+                raise SSHExecutionError(f"Download failed: local file was not created at {local_path}")
+            
+            # 获取文件大小用于验证
+            local_size = os.path.getsize(local_path)
+            if local_size == 0:
+                os.remove(local_path)  # 删除空文件
+                raise SSHExecutionError(f"Download failed: received empty file")
+            
+            self.logger.info(f"Successfully downloaded {remote_path} to {local_path} (size: {local_size} bytes)")
             return True
             
         except Exception as e:
