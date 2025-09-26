@@ -15,7 +15,8 @@ from .scenario_manager import ScenarioManager
 from .scenario_runner import ScenarioRunner, ScenarioResult
 from .docker_manager import DockerComposeManager
 from .benchmark_runner import BenchmarkRunner, TestResult
-from .result_collector import ResultCollector, ResultSummary
+from .result.result_collector import ResultCollector
+from .result.result_models import ResultSummary
 from .health_checker import HealthChecker, HealthStatus
 from .exceptions import (
     PlaybookException, ConfigurationError, ScenarioError,
@@ -316,7 +317,6 @@ class PlaybookCore:
                 # 这里不需要重复收集，可以从result.metrics中获取收集信息
                 if 'result_collection' in result.metrics:
                     # 结果已经收集，创建一个简单的摘要对象
-                    from .result_collector import ResultSummary
                     summary = ResultSummary(
                         scenario_name=scenario_name,
                         timestamp=result.start_time.strftime("%Y%m%d_%H%M%S") if result.start_time else "",
@@ -328,7 +328,6 @@ class PlaybookCore:
                     )
                 else:
                     # 兜底：创建基本摘要
-                    from .result_collector import ResultSummary
                     summary = ResultSummary(
                         scenario_name=scenario_name,
                         timestamp=result.start_time.strftime("%Y%m%d_%H%M%S") if result.start_time else "",

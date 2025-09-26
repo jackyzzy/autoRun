@@ -443,41 +443,66 @@ class TestScriptExecutor:
         return artifacts
     
     def _collect_remote_artifacts(self, node_name: str, result_paths: List[str]) -> List[str]:
-        """收集远程结果文件"""
+        """获取远程结果文件列表"""
         artifacts = []
-        
+
         if not result_paths:
             return artifacts
-        
+
         try:
-            # 创建本地结果目录
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            local_result_dir = Path(f"results/{timestamp}/{node_name}")
-            local_result_dir.mkdir(parents=True, exist_ok=True)
-            
+
             for result_path in result_paths:
                 try:
-                    # 下载文件
-                    # TODO: 此处传进来的是目录，但是实际上下载的时候校验的是文件导致下载错误
-                    download_results = self.node_manager.download_files(
-                        result_path,
-                        str(local_result_dir),
-                        [node_name]
+                    # 检测远程路径类型：目录、文件或不存在
+                    probe_cmd = (
+                        f"if [ -d \"{result_path}\" ]; then echo DIR; "
+                        f"elif [ -f \"{result_path}\" ]; then echo FILE; "
+                        f"else echo MISSING; fi"
                     )
-                    
-                    if download_results.get(node_name, False):
-                        # 查找下载的文件
-                        for file_path in local_result_dir.rglob('*'):
-                            if file_path.is_file():
-                                artifacts.append(str(file_path))
-                    
+                    probe_results = self.node_manager.execute_command(probe_cmd, [node_name], timeout=10)
+                    probe_result = probe_results.get(node_name)
+
+                    if not probe_result:
+                        self.logger.warning(f"No response probing remote path {result_path} on {node_name}")
+                        continue
+
+                    _, stdout, _ = probe_result
+                    path_type = stdout.strip().upper() if stdout else ''
+
+                    if path_type == 'DIR':
+                        # 处理目录：获取所有文件列表
+                        self.logger.info(f"Listing files in remote directory {result_path} from {node_name}")
+
+                        # 获取目录中所有文件列表
+                        find_cmd = f"find \"{result_path}\" -type f"
+                        find_results = self.node_manager.execute_command(find_cmd, [node_name], timeout=30)
+                        find_result = find_results.get(node_name)
+
+                        if find_result and find_result[0] == 0:
+                            file_list = [f.strip() for f in find_result[1].strip().split('\n') if f.strip()] if find_result[1].strip() else []
+
+                            # 添加所有远程文件路径到artifacts
+                            for file_path in file_list:
+                                if file_path:
+                                    artifacts.append(file_path)
+                        else:
+                            self.logger.warning(f"Failed to list files in directory {result_path} on {node_name}")
+
+                    elif path_type == 'FILE':
+                        # 处理文件：添加到文件列表
+                        self.logger.info(f"Found remote file {result_path} from {node_name}")
+                        artifacts.append(result_path)
+
+                    else:
+                        # 路径不存在
+                        self.logger.info(f"Remote path not found: {result_path} on {node_name}")
+
                 except Exception as e:
-                    self.logger.warning(f"Failed to download artifact from {result_path}: {e}")
-            
+                    self.logger.warning(f"Failed to list artifact from {result_path}: {e}")
+
         except Exception as e:
-            self.logger.error(f"Failed to collect remote artifacts: {e}")
-        
+            self.logger.error(f"Failed to list remote artifacts: {e}")
+
         return artifacts
     
     def _parse_test_metrics(self, stdout: str, stderr: str) -> Dict[str, Any]:
