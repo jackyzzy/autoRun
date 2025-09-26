@@ -23,9 +23,6 @@ from .concurrent_deployer import (
 )
 from ..utils.logger import setup_scenario_logger
 
-from .result.result_models import CollectionMode
-from .result.result_collector import ResultCollector
-
 class ScenarioStatus(Enum):
     """场景状态枚举"""
     PENDING = "pending"
@@ -565,6 +562,7 @@ class ScenarioRunner:
 
     def _get_collection_mode(self, scenario: Scenario):
         """根据配置获取收集模式"""
+        from .result.result_models import CollectionMode
 
         # 1. 优先使用场景级别的配置
         if scenario.metadata and scenario.metadata.test_execution:
@@ -844,6 +842,7 @@ class ScenarioRunner:
                 )
 
             # 使用ResultCollector收集结果
+            from .result.result_collector import ResultCollector
             result_collector = ResultCollector(self.node_manager)
 
             # 根据配置选择收集模式
