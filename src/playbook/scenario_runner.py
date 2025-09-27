@@ -327,7 +327,14 @@ class ScenarioRunner:
             time.sleep(30)
     
     def _execute_scenario_steps(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger, base_result_dir: Optional[Path] = None):
-        """执行场景步骤（分布式部署流程）"""
+        """执行场景步骤（分布式部署流程）- 增强取消检查"""
+
+        # 检查函数
+        def check_cancelled(step_name):
+            if self.cancelled:
+                logger.warning(f"🚨 Execution cancelled, skipping {step_name}")
+                raise RuntimeError("Execution cancelled by user")
+
         # 验证必须配置
         if not scenario.metadata or not scenario.metadata.services:
             raise RuntimeError(f"Scenario {scenario.name} missing required services configuration")
@@ -346,15 +353,23 @@ class ScenarioRunner:
         logger.info("\n\nStep 2: Building service dependency graph")
         self._build_service_dependencies(scenario, result, logger)
 
+        # 🚨 关键检查点1：部署服务前
+        check_cancelled("Step 3: Deploying services")
         logger.info("\n\nStep 3: Deploying services in dependency order")
         self._deploy_services_with_dependencies(scenario, result, logger)
 
+        # 🚨 关键检查点2：健康检查前
+        check_cancelled("Step 4: Health checks")
         logger.info("\n\nStep 4: Running comprehensive health checks")
         self._run_comprehensive_health_checks(scenario, result, logger)
 
+        # 🚨 关键检查点3：测试执行前
+        check_cancelled("Step 5: Test execution")
         logger.info("\n\nStep 5: Executing test scripts")
         self._execute_test_scripts(scenario, result, logger)
 
+        # 🚨 关键检查点4：结果收集前
+        check_cancelled("Step 6: Result collection")
         logger.info("\n\nStep 6: Collecting distributed results")
         self._collect_distributed_results(scenario, result, logger, base_result_dir)
 
@@ -596,15 +611,130 @@ class ScenarioRunner:
         return CollectionMode.STANDARD
 
     def cancel(self):
-        """取消执行"""
+        """取消执行 - 增强版，包含双重保险服务清理"""
         self.cancelled = True
-        self.logger.info("Cancelling scenario execution")
+        self.logger.info("🚨 Cancelling scenario execution with service cleanup")
 
         if self.current_scenario:
             current_result = self.results.get(self.current_scenario)
             if current_result and current_result.status == ScenarioStatus.RUNNING:
                 current_result.cancel()
-    
+
+            # 🚨 双重保险：紧急停止当前场景的已部署服务
+            self._emergency_stop_current_scenario_services()
+
+    def _emergency_stop_current_scenario_services(self):
+        """紧急停止当前场景服务 - 双重保险机制"""
+        if not self.current_scenario:
+            return
+
+        try:
+            scenario = self.scenario_manager.get_scenario(self.current_scenario)
+            if not (scenario and scenario.metadata and scenario.metadata.services):
+                return
+
+            self.logger.warning(f"🚨 Emergency stopping services for cancelled scenario: {self.current_scenario}")
+
+            # 🎯 主要方案：智能依赖清理
+            if (hasattr(self, 'dependency_resolver') and self.dependency_resolver and
+                hasattr(self.dependency_resolver, 'get_deployment_batches')):
+
+                try:
+                    batches = self.dependency_resolver.get_deployment_batches()
+                    if batches:  # 确保有有效的批次数据
+                        self.logger.info("✅ Using intelligent dependency-based cleanup")
+                        reversed_batches = list(reversed(batches))
+                        asyncio.run(self._emergency_stop_services_concurrent(
+                            reversed_batches, Path(scenario.directory), self.logger
+                        ))
+                        return
+                    else:
+                        self.logger.warning("⚠️ Dependency batches empty, falling back to force cleanup")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Dependency-based cleanup failed: {e}, falling back to force cleanup")
+
+            # 🛡️ 备用方案：强制全清理
+            self.logger.warning("🔧 Using fallback force cleanup method")
+            self._emergency_stop_services_force(scenario, Path(scenario.directory))
+
+        except Exception as e:
+            self.logger.error(f"❌ Emergency service cleanup completely failed: {e}")
+
+    async def _emergency_stop_services_concurrent(self, batches, scenario_path, logger):
+        """智能并发紧急停止服务（主要方案）"""
+        max_concurrent = 8
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        total_services = sum(len(batch) for batch in batches)
+        stopped_count = 0
+        failed_count = 0
+
+        logger.info(f"🔄 Intelligently stopping {total_services} services across {len(batches)} dependency batches")
+
+        for i, batch in enumerate(batches, 1):
+            logger.info(f"📋 Emergency stopping batch {i}/{len(batches)} ({len(batch)} services)")
+
+            async def stop_single_service(service_node):
+                nonlocal stopped_count, failed_count
+                async with semaphore:
+                    service = service_node.service
+
+                    for node_name in service.nodes:
+                        try:
+                            logger.info(f"🔄 Stopping {service.name} on {node_name}...")
+
+                            loop = asyncio.get_event_loop()
+                            success = await loop.run_in_executor(
+                                None, self.docker_manager.stop_service,
+                                scenario_path, service, node_name, 30  # 30秒紧急超时
+                            )
+
+                            if success:
+                                logger.info(f"✅ Emergency stopped {service.name} on {node_name}")
+                                stopped_count += 1
+                            else:
+                                logger.warning(f"⚠️ Failed to stop {service.name} on {node_name}")
+                                failed_count += 1
+
+                        except Exception as e:
+                            logger.error(f"❌ Error stopping {service.name} on {node_name}: {e}")
+                            failed_count += 1
+
+            # 批次内并发停止，批次间串行
+            tasks = [stop_single_service(service_node) for service_node in batch]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            logger.info(f"✅ Emergency batch {i}/{len(batches)} completed")
+
+        logger.info(f"📊 Intelligent cleanup summary: {stopped_count} stopped, {failed_count} failed")
+
+    def _emergency_stop_services_force(self, scenario, scenario_path):
+        """强制紧急停止服务（备用方案）"""
+        self.logger.info("🔧 Force stopping all services (fallback method)")
+
+        stopped_count = 0
+        failed_count = 0
+        total_services = len(scenario.metadata.services)
+
+        for service in scenario.metadata.services:
+            for node_name in service.nodes:
+                try:
+                    self.logger.info(f"🔄 Force stopping {service.name} on {node_name}...")
+                    success = self.docker_manager.stop_service(
+                        scenario_path, service, node_name, timeout=30
+                    )
+                    if success:
+                        self.logger.info(f"✅ Force stopped {service.name} on {node_name}")
+                        stopped_count += 1
+                    else:
+                        self.logger.warning(f"⚠️ Failed to force stop {service.name} on {node_name}")
+                        failed_count += 1
+                except Exception as e:
+                    self.logger.error(f"❌ Error force stopping {service.name} on {node_name}: {e}")
+                    failed_count += 1
+
+        self.logger.info(f"📊 Force cleanup summary: {stopped_count}/{total_services} stopped, {failed_count} failed")
+
     def get_execution_summary(self) -> Dict[str, Any]:
         """获取执行摘要"""
         if not self.results:

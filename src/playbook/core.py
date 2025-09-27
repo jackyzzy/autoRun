@@ -562,21 +562,21 @@ class PlaybookCore:
         return results
     
     def cleanup(self) -> None:
-        """清理资源"""
+        """清理资源 - 增强版，正确的清理顺序"""
         try:
-            self.logger.info("Cleaning up resources")
-            
-            # 关闭SSH连接
-            self.node_manager.close_all_connections()
-            
-            # 停止正在运行的任务
+            self.logger.info("🧹 Cleaning up resources...")
+
+            # 1. 优先停止正在运行的场景服务（需要SSH连接）
             if hasattr(self.scenario_runner, 'cancel'):
-                self.scenario_runner.cancel()
-            
-            self.logger.info("Cleanup completed")
-            
+                self.scenario_runner.cancel()  # 这里会执行服务停止
+
+            # 2. 关闭SSH连接
+            self.node_manager.close_all_connections()
+
+            self.logger.info("✅ Cleanup completed")
+
         except Exception as e:
-            self.logger.error(f"Error during cleanup: {e}")
+            self.logger.error(f"❌ Error during cleanup: {e}")
     
     def __enter__(self) -> 'PlaybookCore':
         return self
