@@ -178,46 +178,53 @@ class PlaybookCore:
             测试执行结果摘要
         """
         self.logger.info("Starting full test suite execution")
-        
+
         try:
+            # 创建统一的结果目录用于全场景执行
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            suite_result_dir = self.results_dir / f"{timestamp}_all_scenarios"
+            suite_result_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Created suite result directory: {suite_result_dir}")
+
             # 1. 系统健康检查
             self.logger.info("\n\nStep 1: Performing health checks")
             health_results = self.health_checker.run_all_checks()
             overall_health = self.health_checker.get_overall_health()
-            
+
             if overall_health == HealthStatus.UNHEALTHY:
                 raise RuntimeError("System health check failed. Cannot proceed with tests.")
             elif overall_health == HealthStatus.DEGRADED:
                 self.logger.warning("System health is degraded, but continuing with tests")
-            
+
             # 2. 验证测试环境
             self.logger.info("\n\nStep 2: Validating test environment")
             nodes = self.node_manager.get_nodes(enabled_only=True)
             node_names = [node.name for node in nodes]
             validation_results = self.benchmark_runner.validate_test_environment(node_names)
-            
+
             failed_nodes = [
                 name for name, result in validation_results.items()
                 if result['overall_status'] != 'ready'
             ]
-            
+
             if failed_nodes:
                 self.logger.warning(f"Some nodes failed validation: {failed_nodes}")
-            
+
             # 3. 执行所有场景
             self.logger.info("\n\nStep 3: Executing all scenarios")
-            scenario_results = self.scenario_runner.run_all_scenarios()
-            
+            scenario_results = self.scenario_runner.run_all_scenarios(base_result_dir=suite_result_dir)
+
             # 4. 收集和汇总结果
             self.logger.info("\n\nStep 4: Collecting and summarizing results")
-            
+
             # 生成测试套件汇总报告（基于已收集的场景结果）
             self.logger.info("Generating test suite summary from all scenario results")
             execution_summary = self.scenario_runner.get_execution_summary()
             health_report = self.health_checker.get_health_report()
 
             suite_summary = self.result_collector.generate_test_suite_summary(
-                scenario_results, execution_summary, health_report
+                scenario_results, execution_summary, health_report, suite_result_dir=suite_result_dir
             )
 
             # 5. 生成整体报告
@@ -257,7 +264,7 @@ class PlaybookCore:
             场景执行结果
         """
         self.logger.info(f"Running single scenario: {scenario_name}")
-        
+
         try:
             scenario = self.scenario_manager.get_scenario(scenario_name)
             if not scenario:
@@ -272,16 +279,23 @@ class PlaybookCore:
                 status='failed',
                 error=f"Failed to load scenario: {str(e)}"
             )
-        
+
         if not scenario.enabled:
             return ExecutionResult(
                 status='skipped',
                 message='Scenario is disabled'
             )
-        
+
         try:
+            # 创建单场景结果目录
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            single_result_dir = self.results_dir / f"{timestamp}_{scenario_name}"
+            single_result_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Created single scenario result directory: {single_result_dir}")
+
             # 运行场景
-            result = self.scenario_runner.run_scenario(scenario_name)
+            result = self.scenario_runner.run_scenario(scenario_name, base_result_dir=single_result_dir)
             
             # 收集结果
             if result.is_success:

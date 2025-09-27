@@ -44,16 +44,18 @@ class ResultCollector:
     
     def collect_scenario_results(self, scenario: Scenario, scenario_result: ScenarioResult,
                                test_execution_result: TestExecutionResult = None,
-                               mode: CollectionMode = CollectionMode.STANDARD) -> ResultSummary:
+                               mode: CollectionMode = CollectionMode.STANDARD,
+                               custom_result_dir: Optional[Path] = None) -> ResultSummary:
         """
         收集场景测试结果 - 重构版本
-        
+
         Args:
             scenario: 场景对象，包含服务-节点映射信息
             scenario_result: 场景执行结果
             test_execution_result: 测试执行结果，包含已收集的artifacts
             mode: 收集模式
-            
+            custom_result_dir: 自定义结果目录，如果提供则直接使用
+
         Returns:
             ResultSummary: 结果摘要
         """
@@ -62,8 +64,19 @@ class ResultCollector:
 
         self.logger.info(f"Collecting results for scenario {scenario_name} with mode {mode.value}")
 
-        # 创建标准化的结果目录结构
-        scenario_result_dir = self._create_result_directory_structure(timestamp, scenario_name)
+        # 确定结果目录
+        if custom_result_dir:
+            # 使用自定义目录
+            scenario_result_dir = custom_result_dir
+            # 确保子目录存在
+            (scenario_result_dir / "artifacts").mkdir(exist_ok=True)
+            (scenario_result_dir / "logs").mkdir(exist_ok=True)
+            (scenario_result_dir / "metadata").mkdir(exist_ok=True)
+            (scenario_result_dir / "reports").mkdir(exist_ok=True)
+            self.logger.info(f"Using custom result directory: {scenario_result_dir}")
+        else:
+            # 创建标准化的结果目录结构
+            scenario_result_dir = self._create_result_directory_structure(timestamp, scenario_name)
 
         # 创建收集任务
         task_id = f"collect_{scenario_name}_{timestamp}"
@@ -190,7 +203,8 @@ class ResultCollector:
 
     def generate_test_suite_summary(self, scenario_results: Dict[str, Any],
                                    execution_summary: dict,
-                                   health_report: dict) -> TestSuiteResultSummary:
+                                   health_report: dict,
+                                   suite_result_dir: Optional[Path] = None) -> TestSuiteResultSummary:
         """
         生成测试套件汇总报告 - 基于已收集的场景结果进行汇总
 
@@ -198,6 +212,7 @@ class ResultCollector:
             scenario_results: 各场景的执行结果字典 {scenario_name: ScenarioResult}
             execution_summary: 执行摘要信息
             health_report: 健康检查报告
+            suite_result_dir: 可选的测试套件结果目录，如果提供则在其下创建汇总
 
         Returns:
             TestSuiteResultSummary: 测试套件结果汇总
@@ -206,9 +221,16 @@ class ResultCollector:
 
         self.logger.info("Generating test suite summary from scenario results")
 
-        # 创建测试套件级别的结果目录
-        suite_result_dir = self.results_base_dir / timestamp / "test_suite_summary"
-        suite_result_dir.mkdir(parents=True, exist_ok=True)
+        # 确定测试套件级别的结果目录
+        if suite_result_dir:
+            # 使用提供的目录，在其下创建test_suite_summary子目录
+            summary_dir = suite_result_dir / "test_suite_summary"
+            summary_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Using provided suite result directory: {summary_dir}")
+        else:
+            # 创建新的测试套件级别的结果目录（向后兼容）
+            summary_dir = self.results_base_dir / timestamp / "test_suite_summary"
+            summary_dir.mkdir(parents=True, exist_ok=True)
 
         # 初始化汇总对象
         suite_summary = TestSuiteResultSummary(
@@ -273,7 +295,7 @@ class ResultCollector:
             suite_summary.overall_success_rate = (suite_summary.successful_scenarios / suite_summary.total_scenarios) * 100.0
 
         # 保存测试套件汇总
-        summary_file = suite_result_dir / "test_suite_summary.json"
+        summary_file = summary_dir / "test_suite_summary.json"
         try:
             with open(summary_file, 'w', encoding='utf-8') as f:
                 json.dump(suite_summary.to_dict(), f, indent=2, ensure_ascii=False)
@@ -283,7 +305,7 @@ class ResultCollector:
 
         # 生成测试套件报告
         try:
-            self.reporter.generate_suite_report(suite_result_dir, suite_summary)
+            self.reporter.generate_suite_report(summary_dir, suite_summary)
         except Exception as e:
             self.logger.error(f"Failed to generate test suite report: {e}")
 

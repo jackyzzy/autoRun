@@ -144,26 +144,26 @@ class ScenarioRunner:
         self.on_scenario_complete: Optional[Callable[[str, ScenarioResult], None]] = None
         self.on_all_complete: Optional[Callable[[Dict[str, ScenarioResult]], None]] = None
     
-    def run_all_scenarios(self) -> Dict[str, ScenarioResult]:
+    def run_all_scenarios(self, base_result_dir: Optional[Path] = None) -> Dict[str, ScenarioResult]:
         """执行所有场景"""
         if self.is_running:
             raise RuntimeError("Scenario runner is already running")
-        
+
         self.is_running = True
         self.cancelled = False
         self.results.clear()
-        
+
         try:
             execution_order = self.scenario_manager.get_execution_order()
             self.logger.info(f"Starting execution of {len(execution_order)} scenarios")
-            
+
             for i, scenario_name in enumerate(execution_order):
                 if self.cancelled:
                     self.logger.info("Execution cancelled by user")
                     break
-                
+
                 self.logger.info(f"Executing scenario {i+1}/{len(execution_order)}: {scenario_name}")
-                result = self.run_scenario(scenario_name)
+                result = self.run_scenario(scenario_name, base_result_dir=base_result_dir)
 
                 # 🧹 完全清理scenario后的所有资源，确保scenarios间完全隔离
                 self.logger.info(f"Cleaning up resources after scenario: {scenario_name}")
@@ -206,7 +206,7 @@ class ScenarioRunner:
         
         return self.results
     
-    def run_scenario(self, scenario_name: str) -> ScenarioResult:
+    def run_scenario(self, scenario_name: str, base_result_dir: Optional[Path] = None) -> ScenarioResult:
         """执行单个场景"""
         scenario = self.scenario_manager.get_scenario(scenario_name)
         if not scenario:
@@ -214,20 +214,20 @@ class ScenarioRunner:
             result.fail(f"Scenario not found: {scenario_name}")
             self.results[scenario_name] = result
             return result
-        
+
         if not scenario.enabled:
             result = ScenarioResult(scenario_name)
             result.skip("Scenario is disabled")
             self.results[scenario_name] = result
             return result
-        
+
         # 验证场景
         if not scenario.is_valid:
             result = ScenarioResult(scenario_name)
             result.fail("Scenario validation failed: missing required files")
             self.results[scenario_name] = result
             return result
-        
+
         self.current_scenario = scenario_name
         result = ScenarioResult(scenario_name)
         self.results[scenario_name] = result
@@ -250,7 +250,7 @@ class ScenarioRunner:
                 scenario_logger.info(f"Starting scenario execution: {scenario.description}")
                 
                 # 执行场景步骤
-                self._execute_scenario_steps(scenario, result, scenario_logger)
+                self._execute_scenario_steps(scenario, result, scenario_logger, base_result_dir)
                 
                 result.complete()
                 scenario_logger.info("Scenario completed successfully")
@@ -326,7 +326,7 @@ class ScenarioRunner:
             # 即使清理失败也要继续重试，但至少等待基本延迟
             time.sleep(30)
     
-    def _execute_scenario_steps(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
+    def _execute_scenario_steps(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger, base_result_dir: Optional[Path] = None):
         """执行场景步骤（分布式部署流程）"""
         # 验证必须配置
         if not scenario.metadata or not scenario.metadata.services:
@@ -356,7 +356,7 @@ class ScenarioRunner:
         self._execute_test_scripts(scenario, result, logger)
 
         logger.info("\n\nStep 6: Collecting distributed results")
-        self._collect_distributed_results(scenario, result, logger)
+        self._collect_distributed_results(scenario, result, logger, base_result_dir)
 
         logger.info("\n\nStep 7: Stopping distributed services")
         self._stop_distributed_services(scenario, result, logger)
@@ -823,7 +823,7 @@ class ScenarioRunner:
         if test_result.metrics:
             logger.info(f"Test metrics: {test_result.metrics}")
     
-    def _collect_distributed_results(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger):
+    def _collect_distributed_results(self, scenario: Scenario, result: ScenarioResult, logger: logging.Logger, base_result_dir: Optional[Path] = None):
         """收集分布式结果 - 使用新的ResultCollector"""
         logger.info("Collecting distributed results using ResultCollector")
 
@@ -848,10 +848,18 @@ class ScenarioRunner:
             # 根据配置选择收集模式
             collection_mode = self._get_collection_mode(scenario)
 
+            # 确定结果目录
+            custom_result_dir = None
+            if base_result_dir:
+                # 在基础目录下创建场景特定目录
+                custom_result_dir = base_result_dir / scenario.name
+                custom_result_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Using custom result directory: {custom_result_dir}")
+
             # 执行结果收集
             if test_execution_result is not None:
                 summary = result_collector.collect_scenario_results(
-                    scenario, result, test_execution_result, collection_mode
+                    scenario, result, test_execution_result, collection_mode, custom_result_dir=custom_result_dir
                 )
             else:
                 # 如果没有测试执行结果，创建一个空的结果对象
@@ -861,7 +869,7 @@ class ScenarioRunner:
                     artifacts=result.artifacts.copy()
                 )
                 summary = result_collector.collect_scenario_results(
-                    scenario, result, empty_test_result, collection_mode
+                    scenario, result, empty_test_result, collection_mode, custom_result_dir=custom_result_dir
                 )
 
             # 将结果摘要信息添加到scenario result中
