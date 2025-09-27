@@ -112,3 +112,63 @@ class ResultSummary:
             },
             'node_results': self.node_results
         }
+
+
+@dataclass
+class TestSuiteResultSummary:
+    """测试套件结果汇总"""
+    suite_name: str = "Full Test Suite"
+    timestamp: str = ""
+    total_scenarios: int = 0
+    successful_scenarios: int = 0
+    failed_scenarios: int = 0
+
+    # 汇总的性能指标
+    overall_avg_throughput: float = 0.0
+    overall_max_throughput: float = 0.0
+    overall_success_rate: float = 0.0
+    total_execution_time: float = 0.0
+
+    # 文件统计汇总
+    total_result_files: int = 0
+    total_size_mb: float = 0.0
+
+    # 各场景摘要
+    scenario_summaries: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    # 健康检查和执行摘要
+    health_report: Dict[str, Any] = field(default_factory=dict)
+    execution_summary: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def overall_success_rate_pct(self) -> float:
+        """总体成功率百分比"""
+        if self.total_scenarios == 0:
+            return 0.0
+        return (self.successful_scenarios / self.total_scenarios) * 100.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            'suite_name': self.suite_name,
+            'timestamp': self.timestamp,
+            'summary': {
+                'total_scenarios': self.total_scenarios,
+                'successful_scenarios': self.successful_scenarios,
+                'failed_scenarios': self.failed_scenarios,
+                'overall_success_rate': self.overall_success_rate_pct,
+                'total_execution_time': self.total_execution_time
+            },
+            'performance_metrics': {
+                'overall_avg_throughput': self.overall_avg_throughput,
+                'overall_max_throughput': self.overall_max_throughput,
+                'overall_success_rate': self.overall_success_rate
+            },
+            'file_statistics': {
+                'total_result_files': self.total_result_files,
+                'total_size_mb': self.total_size_mb
+            },
+            'scenario_summaries': self.scenario_summaries,
+            'health_report': self.health_report,
+            'execution_summary': self.execution_summary
+        }

@@ -195,8 +195,8 @@ class ResultTransporter:
         
         return downloaded_files
     
-    def collect_files_from_nodes_legacy(self, task: CollectionTask) -> List[str]:
-        """从节点收集文件 - 兼容旧版本的方法"""
+    def aggregate_files_info(self, task: CollectionTask) -> List[str]:
+        """汇总文件信息 - 用于测试套件汇总"""
         collected_files = []
         
         for node_name in task.node_names:

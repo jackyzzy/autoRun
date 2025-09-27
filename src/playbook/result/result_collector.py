@@ -17,7 +17,7 @@ from ..scenario_manager import Scenario
 from ..scenario_runner import ScenarioResult
 from ..test_script_executor import TestExecutionResult
 
-from .result_models import CollectionMode, CollectionTask, CollectionSummary, ResultSummary
+from .result_models import CollectionMode, CollectionTask, CollectionSummary, ResultSummary, TestSuiteResultSummary
 from .result_transporter import ResultTransporter
 from .result_analyzer import ResultAnalyzer
 from .result_reporter import ResultReporter
@@ -188,78 +188,110 @@ class ResultCollector:
     # 向后兼容接口
     # ==========================
 
-    def collect_scenario_results_legacy(self, scenario_name: str, test_results: Dict[str, TestResult],
-                                       node_names: List[str] = None) -> ResultSummary:
+    def generate_test_suite_summary(self, scenario_results: Dict[str, Any],
+                                   execution_summary: dict,
+                                   health_report: dict) -> TestSuiteResultSummary:
         """
-        收集场景测试结果 - 旧版本接口，用于向后兼容
-        
-        Args:
-            scenario_name: 场景名称
-            test_results: 测试结果字典
-            node_names: 节点名称列表
-            
-        Returns:
-            ResultSummary: 结果摘要
-        """
-        if node_names is None:
-            node_names = list(test_results.keys())
+        生成测试套件汇总报告 - 基于已收集的场景结果进行汇总
 
+        Args:
+            scenario_results: 各场景的执行结果字典 {scenario_name: ScenarioResult}
+            execution_summary: 执行摘要信息
+            health_report: 健康检查报告
+
+        Returns:
+            TestSuiteResultSummary: 测试套件结果汇总
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        self.logger.warning(f"Using legacy collect_scenario_results for {scenario_name}. "
-                           "Consider upgrading to the new interface.")
+        self.logger.info("Generating test suite summary from scenario results")
 
-        # 创建结果目录
-        scenario_result_dir = self.results_base_dir / timestamp / scenario_name
-        scenario_result_dir.mkdir(parents=True, exist_ok=True)
+        # 创建测试套件级别的结果目录
+        suite_result_dir = self.results_base_dir / timestamp / "test_suite_summary"
+        suite_result_dir.mkdir(parents=True, exist_ok=True)
 
-        # 创建收集任务
-        task_id = f"collect_legacy_{scenario_name}_{timestamp}"
-
-        task = CollectionTask(
-            task_id=task_id,
-            scenario_name=scenario_name,
-            node_names=node_names,
-            remote_paths=[],
-            local_base_path=str(scenario_result_dir),
-            mode=CollectionMode.BASIC
+        # 初始化汇总对象
+        suite_summary = TestSuiteResultSummary(
+            timestamp=timestamp,
+            health_report=health_report,
+            execution_summary=execution_summary
         )
 
-        self.active_tasks[task_id] = task
+        # 汇总各场景的结果
+        total_throughput = 0.0
+        max_throughput = 0.0
+        total_files = 0
+        total_size = 0.0
+        total_execution_time = 0.0
 
+        for scenario_name, scenario_result in scenario_results.items():
+            suite_summary.total_scenarios += 1
+
+            # 统计成功失败场景数
+            if scenario_result.is_success:
+                suite_summary.successful_scenarios += 1
+            else:
+                suite_summary.failed_scenarios += 1
+
+            # 汇总执行时间
+            if scenario_result.duration:
+                total_execution_time += scenario_result.duration.total_seconds()
+
+            # 从scenario_result.metrics中提取结果收集信息
+            scenario_summary = {}
+            if hasattr(scenario_result, 'metrics') and 'result_collection' in scenario_result.metrics:
+                collection_info = scenario_result.metrics['result_collection']
+                total_files += collection_info.get('total_files', 0)
+                total_size += collection_info.get('total_size_mb', 0.0)
+
+                scenario_summary = {
+                    'status': scenario_result.status.value if hasattr(scenario_result.status, 'value') else str(scenario_result.status),
+                    'duration_seconds': scenario_result.duration.total_seconds() if scenario_result.duration else 0,
+                    'result_files': collection_info.get('total_files', 0),
+                    'result_size_mb': collection_info.get('total_size_mb', 0.0),
+                    'successful_nodes': collection_info.get('successful_nodes', 0),
+                    'failed_nodes': collection_info.get('failed_nodes', 0),
+                    'error_message': scenario_result.error_message if hasattr(scenario_result, 'error_message') else ""
+                }
+            else:
+                # 如果没有结果收集信息，创建基本摘要
+                scenario_summary = {
+                    'status': scenario_result.status.value if hasattr(scenario_result.status, 'value') else str(scenario_result.status),
+                    'duration_seconds': scenario_result.duration.total_seconds() if scenario_result.duration else 0,
+                    'error_message': scenario_result.error_message if hasattr(scenario_result, 'error_message') else ""
+                }
+
+            suite_summary.scenario_summaries[scenario_name] = scenario_summary
+
+        # 设置汇总统计
+        suite_summary.total_result_files = total_files
+        suite_summary.total_size_mb = total_size
+        suite_summary.total_execution_time = total_execution_time
+
+        # 计算总体成功率
+        if suite_summary.total_scenarios > 0:
+            suite_summary.overall_success_rate = (suite_summary.successful_scenarios / suite_summary.total_scenarios) * 100.0
+
+        # 保存测试套件汇总
+        summary_file = suite_result_dir / "test_suite_summary.json"
         try:
-            task.status = "running"
-
-            # 收集文件（使用旧方法）
-            collected_files = self.transporter.collect_files_from_nodes_legacy(task)
-            task.collected_files = collected_files
-
-            # 保存测试结果元数据
-            self.analyzer.save_test_metadata(scenario_result_dir, test_results)
-
-            # 生成结果摘要
-            summary = self.analyzer.generate_result_summary_legacy(scenario_name, timestamp, test_results, collected_files)
-
-            # 保存摘要
-            self.reporter.save_result_summary(scenario_result_dir, summary)
-
-            # 生成报告
-            self.reporter.generate_markdown_report_legacy(scenario_result_dir, summary)
-
-            task.status = "completed"
-            self.logger.info(f"Legacy result collection completed for scenario {scenario_name}")
-
-            return summary
-
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                json.dump(suite_summary.to_dict(), f, indent=2, ensure_ascii=False)
+            self.logger.info(f"Test suite summary saved to {summary_file}")
         except Exception as e:
-            task.status = "failed"
-            task.error_message = str(e)
-            self.logger.error(f"Legacy result collection failed for scenario {scenario_name}: {e}")
-            raise
+            self.logger.error(f"Failed to save test suite summary: {e}")
 
-        finally:
-            if task_id in self.active_tasks:
-                del self.active_tasks[task_id]
+        # 生成测试套件报告
+        try:
+            self.reporter.generate_suite_report(suite_result_dir, suite_summary)
+        except Exception as e:
+            self.logger.error(f"Failed to generate test suite report: {e}")
+
+        self.logger.info(f"Test suite summary generated: {suite_summary.total_scenarios} scenarios, "
+                        f"{suite_summary.successful_scenarios} successful, "
+                        f"{suite_summary.overall_success_rate:.1f}% success rate")
+
+        return suite_summary
 
     # ==========================
     # 管理功能

@@ -211,42 +211,20 @@ class PlaybookCore:
             # 4. 收集和汇总结果
             self.logger.info("\n\nStep 4: Collecting and summarizing results")
             
-            # 为每个场景收集结果（这里简化处理）
-            all_summaries = {}
-            for scenario_name, scenario_result in scenario_results.items():
-                if scenario_result.is_success:
-                    # 这里需要根据实际的测试结果来创建TestResult对象
-                    # 暂时创建空的结果用于演示
-                    test_results = {node_name: TestResult(
-                        test_id=f"{scenario_name}_{node_name}",
-                        status=scenario_result.status,
-                        config=None,  # 这里应该是实际的配置
-                        node_name=node_name
-                    ) for node_name in node_names}
-                    
-                    # 使用新的结果收集接口
-                    scenario = self.scenario_manager.get_scenario(scenario_name)
-                    if scenario:
-                        # 注意：这里需要实际的scenario_result和test_execution_result
-                        # 由于这是完整测试套件，可能需要从scenario_runner获取结果
-                        scenario_result = scenario_results.get(scenario_name)
-                        summary = self.result_collector.collect_scenario_results_legacy(
-                            scenario_name, test_results, node_names
-                        )
-                    else:
-                        # 场景未找到，跳过结果收集
-                        self.logger.warning(f"Scenario {scenario_name} not found, skipping result collection")
-                        continue
-                    all_summaries[scenario_name] = summary
-            
-            # 5. 生成整体报告
+            # 生成测试套件汇总报告（基于已收集的场景结果）
+            self.logger.info("Generating test suite summary from all scenario results")
             execution_summary = self.scenario_runner.get_execution_summary()
             health_report = self.health_checker.get_health_report()
-            
+
+            suite_summary = self.result_collector.generate_test_suite_summary(
+                scenario_results, execution_summary, health_report
+            )
+
+            # 5. 生成整体报告
             execution_data = {
                 'execution_summary': execution_summary,
                 'health_report': health_report,
-                'scenario_summaries': {name: summary.to_dict() for name, summary in all_summaries.items()},
+                'test_suite_summary': suite_summary.to_dict(),
                 'validation_results': validation_results
             }
 

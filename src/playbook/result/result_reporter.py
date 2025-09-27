@@ -7,11 +7,11 @@ import json
 import yaml
 import tarfile
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from pathlib import Path
 from datetime import datetime
 
-from .result_models import CollectionSummary, ResultSummary
+from .result_models import CollectionSummary, ResultSummary, TestSuiteResultSummary
 
 
 class ResultReporter:
@@ -195,8 +195,8 @@ class ResultReporter:
         except Exception as e:
             self.logger.error(f"Failed to generate performance report: {e}")
 
-    def generate_markdown_report_legacy(self, result_dir: Path, summary: ResultSummary):
-        """生成Markdown报告 - 兼容旧版本"""
+    def generate_suite_report(self, result_dir: Path, summary: Union[ResultSummary, TestSuiteResultSummary]):
+        """生成测试套件报告 - 用于汇总报告"""
         try:
             def safe_format(value, format_spec=''):
                 if value is None:
@@ -205,7 +205,63 @@ class ResultReporter:
                     return f"{value:{format_spec}}"
                 return str(value)
 
-            report_content = f"""# 测试结果报告
+            # 检查summary类型并生成相应的报告
+            if isinstance(summary, TestSuiteResultSummary):
+                # 生成测试套件汇总报告
+                report_content = f"""# 测试套件汇总报告
+
+## 基本信息
+- **套件名称**: {summary.suite_name}
+- **测试时间**: {summary.timestamp}
+- **总场景数**: {summary.total_scenarios}
+- **成功场景数**: {summary.successful_scenarios}
+- **失败场景数**: {summary.failed_scenarios}
+- **总体成功率**: {safe_format(summary.overall_success_rate_pct, '.1f')}%
+- **总执行时间**: {safe_format(summary.total_execution_time, '.1f')} 秒
+
+## 性能指标汇总
+- **总体平均吞吐量**: {safe_format(summary.overall_avg_throughput, '.2f')} tokens/s
+- **总体最大吞吐量**: {safe_format(summary.overall_max_throughput, '.2f')} tokens/s
+- **总体成功率**: {safe_format(summary.overall_success_rate, '.1f')}%
+
+## 文件统计汇总
+- **总结果文件数**: {summary.total_result_files}
+- **总文件大小**: {safe_format(summary.total_size_mb, '.2f')} MB
+
+## 各场景详细结果
+
+| 场景名称 | 状态 | 执行时长(秒) | 结果文件数 | 文件大小(MB) | 成功节点 | 失败节点 | 错误信息 |
+|---------|------|-------------|------------|-------------|----------|----------|----------|
+"""
+
+                for scenario_name, scenario_info in summary.scenario_summaries.items():
+                    status_icon = "✅" if scenario_info.get('status') == 'completed' else "❌"
+                    status = scenario_info.get('status', 'unknown')
+                    duration = safe_format(scenario_info.get('duration_seconds', 0), '.1f')
+                    result_files = scenario_info.get('result_files', 0)
+                    result_size = safe_format(scenario_info.get('result_size_mb', 0), '.2f')
+                    successful_nodes = scenario_info.get('successful_nodes', 0)
+                    failed_nodes = scenario_info.get('failed_nodes', 0)
+                    error_msg = scenario_info.get('error_message', '')[:50]  # 截断错误信息
+                    if len(scenario_info.get('error_message', '')) > 50:
+                        error_msg += '...'
+
+                    report_content += f"| {scenario_name} | {status_icon} {status} | {duration} | {result_files} | {result_size} | {successful_nodes} | {failed_nodes} | {error_msg} |\\n"
+
+                # 添加健康检查和执行摘要信息
+                if summary.health_report:
+                    report_content += "\\n## 健康检查报告\\n\\n"
+                    for key, value in summary.health_report.items():
+                        report_content += f"- **{key}**: {value}\\n"
+
+                if summary.execution_summary:
+                    report_content += "\\n## 执行摘要\\n\\n"
+                    for key, value in summary.execution_summary.items():
+                        report_content += f"- **{key}**: {value}\\n"
+
+            else:
+                # 原有的单场景报告逻辑 (ResultSummary)
+                report_content = f"""# 测试结果报告
 
 ## 基本信息
 - **场景名称**: {summary.scenario_name}
@@ -232,23 +288,23 @@ class ResultReporter:
 | 节点名称 | 状态 | 吞吐量 | 平均延迟 | 成功率 | 执行时长 |
 |---------|------|--------|----------|--------|----------|
 """
-            
-            for node_name, result in summary.node_results.items():
-                status_icon = "✅" if result['status'] == 'completed' else "❌"
-                throughput = safe_format(result.get('throughput', 0), '.2f')
-                latency_mean = safe_format(result.get('latency_mean', 0), '.3f')
-                success_rate = safe_format(result.get('success_rate', 0), '.1f')
-                duration = safe_format(result.get('duration', 0), '.1f')
-                report_content += f"| {node_name} | {status_icon} {result['status']} | {throughput} | {latency_mean} | {success_rate}% | {duration}s |\\n"
-            
+
+                for node_name, result in summary.node_results.items():
+                    status_icon = "✅" if result['status'] == 'completed' else "❌"
+                    throughput = safe_format(result.get('throughput', 0), '.2f')
+                    latency_mean = safe_format(result.get('latency_mean', 0), '.3f')
+                    success_rate = safe_format(result.get('success_rate', 0), '.1f')
+                    duration = safe_format(result.get('duration', 0), '.1f')
+                    report_content += f"| {node_name} | {status_icon} {result['status']} | {throughput} | {latency_mean} | {success_rate}% | {duration}s |\\n"
+
             markdown_file = result_dir / "test_report.md"
             with open(markdown_file, 'w', encoding='utf-8') as f:
                 f.write(report_content)
-            
-            self.logger.debug(f"Generated Markdown report: {markdown_file}")
-            
+
+            self.logger.debug(f"Generated suite report: {markdown_file}")
+
         except Exception as e:
-            self.logger.error(f"Failed to generate Markdown report: {e}")
+            self.logger.error(f"Failed to generate suite report: {e}")
 
     def generate_html_report(self, result_dir: Path, summary: ResultSummary):
         """生成HTML报告"""

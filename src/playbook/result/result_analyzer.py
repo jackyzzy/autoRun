@@ -65,10 +65,10 @@ class ResultAnalyzer:
 
         return summary
 
-    def generate_result_summary_legacy(self, scenario_name: str, timestamp: str,
+    def generate_aggregated_summary(self, scenario_name: str, timestamp: str,
                                        test_results: Dict[str, TestResult],
                                        collected_files: List[str]) -> ResultSummary:
-        """生成结果摘要 - 旧版本，用于向后兼容"""
+        """生成汇总摘要 - 用于测试套件汇总"""
         summary = ResultSummary(
             scenario_name=scenario_name,
             timestamp=timestamp,
