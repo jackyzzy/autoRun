@@ -5,6 +5,10 @@
 
 import os
 import logging
+import shutil
+import warnings
+import time
+import hashlib
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from datetime import datetime
@@ -13,6 +17,7 @@ from ..node_manager import NodeManager
 from ..scenario_manager import Scenario
 from .result_models import CollectionTask, CollectionSummary
 from ...utils.exception_handler import with_exception_handling, result_collection
+from ..exceptions import ResultCollectionError
 
 
 class ResultTransporter:
@@ -21,11 +26,109 @@ class ResultTransporter:
     def __init__(self, node_manager: NodeManager):
         self.logger = logging.getLogger("playbook.result_transporter")
         self.node_manager = node_manager
-    
+
+    def _ensure_writable_directory(self, dir_path: Path) -> bool:
+        """确保目录存在且可写
+
+        Args:
+            dir_path: 目标目录路径
+
+        Returns:
+            bool: 目录创建并可写返回True，否则返回False
+        """
+        try:
+            dir_path.mkdir(parents=True, exist_ok=True)
+
+            # 验证写权限
+            test_file = dir_path / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+
+            return True
+        except (OSError, PermissionError) as e:
+            self.logger.error(f"Cannot create writable directory {dir_path}: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Unexpected error creating directory {dir_path}: {e}")
+            return False
+
+    def _check_disk_space(self, target_dir: Path, required_bytes: int) -> bool:
+        """检查磁盘空间是否足够
+
+        Args:
+            target_dir: 目标目录
+            required_bytes: 需要的字节数
+
+        Returns:
+            bool: 空间足够返回True，否则返回False
+        """
+        try:
+            stat = shutil.disk_usage(target_dir)
+            available = stat.free
+            buffer_ratio = 1.1  # 10%安全缓冲
+
+            if available < required_bytes * buffer_ratio:
+                self.logger.error(
+                    f"Insufficient disk space: need {required_bytes / (1024*1024):.1f}MB, "
+                    f"available {available / (1024*1024):.1f}MB"
+                )
+                return False
+
+            return True
+        except Exception as e:
+            self.logger.warning(f"Cannot check disk space for {target_dir}: {e}")
+            return True  # 如果无法检查，继续尝试
+
+    def _verify_file_integrity(self, source: Path, target: Path) -> bool:
+        """验证文件完整性
+
+        Args:
+            source: 源文件路径
+            target: 目标文件路径
+
+        Returns:
+            bool: 文件完整返回True，否则返回False
+        """
+        try:
+            # 首先检查文件大小
+            source_size = source.stat().st_size
+            target_size = target.stat().st_size
+
+            if source_size != target_size:
+                self.logger.error(
+                    f"File size mismatch: source={source_size}, target={target_size} for {source.name}"
+                )
+                return False
+
+            # 对于小文件(<10MB)进行MD5校验
+            if source_size < 10 * 1024 * 1024:
+                with open(source, 'rb') as f1, open(target, 'rb') as f2:
+                    hash1 = hashlib.md5(f1.read()).hexdigest()
+                    hash2 = hashlib.md5(f2.read()).hexdigest()
+                    if hash1 != hash2:
+                        self.logger.error(f"MD5 hash mismatch for {source.name}")
+                        return False
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Integrity verification failed for {source.name}: {e}")
+            return False
+
     @result_collection(return_on_error=CollectionSummary(collection_time=datetime.now().isoformat(), mode="artifacts"))
-    def collect_artifacts_from_nodes(self, artifacts: List[str], node_names: List[str], 
+    def collect_artifacts_from_nodes(self, artifacts: List[str], node_names: List[str],
                                    local_base_dir: Path) -> CollectionSummary:
-        """从节点收集测试artifacts"""
+        """从节点收集测试artifacts
+
+        .. deprecated::
+            此方法已废弃，请使用 collect_artifacts_from_test_node() 代替。
+            该方法存在逻辑错误：从所有参与节点收集artifacts，而实际应该只从测试执行节点收集。
+        """
+        warnings.warn(
+            "collect_artifacts_from_nodes() is deprecated. "
+            "Use collect_artifacts_from_test_node() instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         collection_summary = CollectionSummary(
             collection_time=datetime.now().isoformat(),
             mode="artifacts"
@@ -59,7 +162,242 @@ class ResultTransporter:
                 collection_summary.collection_errors.append(error_msg)
         
         return collection_summary
-    
+
+    @result_collection(return_on_error=CollectionSummary(collection_time=datetime.now().isoformat(), mode="artifacts"))
+    def collect_artifacts_from_test_node(self, artifacts: List[str], test_node: str,
+                                       artifacts_dir: Path) -> CollectionSummary:
+        """从测试执行节点收集artifacts到artifacts目录
+
+        Args:
+            artifacts: 要收集的artifact文件路径列表
+            test_node: 测试执行节点名称，"local" 表示本地节点
+            artifacts_dir: artifacts存储目录
+
+        Returns:
+            CollectionSummary: 收集结果摘要
+        """
+        collection_summary = CollectionSummary(
+            collection_time=datetime.now().isoformat(),
+            mode="artifacts"
+        )
+
+        self.logger.info(f"Collecting {len(artifacts)} artifacts from test execution node: {test_node}")
+
+        try:
+            if test_node == "local":
+                collected_artifacts = self._collect_artifacts_local(artifacts, artifacts_dir)
+            else:
+                collected_artifacts = self._collect_artifacts_remote(artifacts, test_node, artifacts_dir)
+
+            # 更新统计
+            collection_summary.total_files_collected = len(collected_artifacts)
+            for artifact_file in collected_artifacts:
+                if Path(artifact_file).exists():
+                    file_size = Path(artifact_file).stat().st_size
+                    collection_summary.total_size_mb += file_size / (1024 * 1024)
+
+            # 记录结果
+            collection_summary.node_results[test_node] = {
+                'artifacts_collected': len(collected_artifacts),
+                'files': [Path(f).name for f in collected_artifacts]
+            }
+
+        except Exception as e:
+            error_msg = f"Failed to collect artifacts from test node {test_node}: {e}"
+            self.logger.error(error_msg)
+            collection_summary.collection_errors.append(error_msg)
+
+        return collection_summary
+
+    def _collect_artifacts_local(self, artifacts: List[str], artifacts_dir: Path) -> List[str]:
+        """从本地节点收集artifacts（直接文件复制）
+
+        Args:
+            artifacts: 要收集的artifact文件路径列表
+            artifacts_dir: artifacts存储目录
+
+        Returns:
+            List[str]: 成功收集的文件路径列表
+
+        Raises:
+            ResultCollectionError: 当目录创建失败或磁盘空间不足时
+        """
+        collected_files = []
+
+        # 预检查目录权限
+        if not self._ensure_writable_directory(artifacts_dir):
+            raise ResultCollectionError(f"Cannot create writable artifacts directory: {artifacts_dir}")
+
+        for artifact_path in artifacts:
+            start_time = time.time()
+            try:
+                source_path = Path(artifact_path)
+                if not source_path.exists():
+                    self.logger.debug(f"Local artifact not found: {artifact_path}")
+                    continue
+
+                # 预检查磁盘空间
+                if source_path.is_file():
+                    file_size = source_path.stat().st_size
+                    if not self._check_disk_space(artifacts_dir, file_size):
+                        raise ResultCollectionError(f"Insufficient disk space for {artifact_path}")
+                elif source_path.is_dir():
+                    # 估算目录大小
+                    dir_size = sum(f.stat().st_size for f in source_path.rglob('*') if f.is_file())
+                    if not self._check_disk_space(artifacts_dir, dir_size):
+                        raise ResultCollectionError(f"Insufficient disk space for directory {artifact_path}")
+
+                # 计算目标文件路径
+                artifact_name = source_path.name
+                target_file = artifacts_dir / artifact_name
+
+                # 执行复制操作
+                if source_path.is_file():
+                    shutil.copy2(source_path, target_file)
+                elif source_path.is_dir():
+                    shutil.copytree(source_path, target_file, dirs_exist_ok=True)
+                elif source_path.is_symlink():
+                    # 处理符号链接
+                    if source_path.exists():  # 检查链接目标是否存在
+                        shutil.copy2(source_path, target_file)
+                        self.logger.debug(f"Copied symlink: {artifact_path} -> {target_file}")
+                    else:
+                        self.logger.warning(f"Broken symlink skipped: {artifact_path}")
+                        continue
+                else:
+                    self.logger.warning(f"Unknown file type skipped: {artifact_path}")
+                    continue
+
+                # 验证完整性（仅对普通文件）
+                if source_path.is_file() and not self._verify_file_integrity(source_path, target_file):
+                    # 清理损坏的文件
+                    target_file.unlink(missing_ok=True)
+                    raise ResultCollectionError(f"File integrity check failed: {artifact_path}")
+
+                collected_files.append(str(target_file))
+
+                # 记录详细日志
+                duration = time.time() - start_time
+                if source_path.is_file():
+                    file_size = source_path.stat().st_size
+                    self.logger.info(
+                        f"Successfully collected: {artifact_path} -> {target_file} "
+                        f"({file_size} bytes, {duration:.2f}s)"
+                    )
+                else:
+                    self.logger.info(
+                        f"Successfully collected directory: {artifact_path} -> {target_file} "
+                        f"({duration:.2f}s)"
+                    )
+
+            except (FileNotFoundError, PermissionError) as e:
+                self.logger.error(f"File access error for {artifact_path}: {e}")
+            except shutil.Error as e:
+                self.logger.error(f"Copy operation failed for {artifact_path}: {e}")
+            except OSError as e:
+                self.logger.error(f"System error collecting {artifact_path}: {e}")
+            except ResultCollectionError:
+                raise  # 重新抛出业务异常
+            except Exception as e:
+                self.logger.error(f"Unexpected error collecting {artifact_path}: {type(e).__name__}: {e}")
+
+        return collected_files
+
+    def _collect_artifacts_remote(self, artifacts: List[str], node_name: str,
+                                artifacts_dir: Path) -> List[str]:
+        """从远程节点收集artifacts（SSH下载）
+
+        Args:
+            artifacts: 要收集的artifact文件路径列表
+            node_name: 远程节点名称
+            artifacts_dir: artifacts存储目录
+
+        Returns:
+            List[str]: 成功收集的文件路径列表
+
+        Raises:
+            ResultCollectionError: 当目录创建失败、节点不存在或连接失败时
+        """
+        collected_files = []
+
+        # 预检查目录权限
+        if not self._ensure_writable_directory(artifacts_dir):
+            raise ResultCollectionError(f"Cannot create writable artifacts directory: {artifacts_dir}")
+
+        node = self.node_manager.get_node(node_name)
+        if not node:
+            raise ResultCollectionError(f"Node not found: {node_name}")
+
+        max_retries = 3
+        retry_delay = 2  # 秒
+        operation_start_time = time.time()
+
+        for retry in range(max_retries):
+            try:
+                client = node.get_ssh_client()
+                self.logger.debug(f"Attempting remote collection from {node_name} (attempt {retry + 1}/{max_retries})")
+
+                with client.connection_context():
+                    for artifact_path in artifacts:
+                        start_time = time.time()
+                        try:
+                            # 检查远程文件是否存在
+                            if not client.file_exists(artifact_path):
+                                self.logger.debug(f"Remote artifact not found on {node_name}: {artifact_path}")
+                                continue
+
+                            # 计算本地文件路径
+                            artifact_name = Path(artifact_path).name
+                            local_file = artifacts_dir / artifact_name
+
+                            # 下载文件
+                            success = client.download_file(artifact_path, str(local_file))
+                            if success:
+                                collected_files.append(str(local_file))
+
+                                # 记录详细日志
+                                duration = time.time() - start_time
+                                if local_file.exists():
+                                    file_size = local_file.stat().st_size
+                                    self.logger.info(
+                                        f"Downloaded artifact: {artifact_path} -> {local_file} "
+                                        f"({file_size} bytes, {duration:.2f}s)"
+                                    )
+                                else:
+                                    self.logger.info(f"Downloaded artifact: {artifact_path} -> {local_file} ({duration:.2f}s)")
+                            else:
+                                self.logger.warning(f"Failed to download artifact: {artifact_path}")
+
+                        except Exception as e:
+                            self.logger.error(f"Error downloading artifact {artifact_path} from {node_name}: {e}")
+
+                # 成功完成，退出重试循环
+                operation_duration = time.time() - operation_start_time
+                self.logger.info(f"Remote collection completed from {node_name} in {operation_duration:.2f}s")
+                break
+
+            except (ConnectionError, TimeoutError) as e:
+                if retry < max_retries - 1:
+                    delay = retry_delay * (retry + 1)  # 递增延迟
+                    self.logger.warning(
+                        f"Connection error collecting from {node_name} (retry {retry + 1}/{max_retries}): {e}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    operation_duration = time.time() - operation_start_time
+                    raise ResultCollectionError(
+                        f"Remote collection failed from {node_name} after {max_retries} retries "
+                        f"(total time: {operation_duration:.2f}s): {e}"
+                    )
+            except Exception as e:
+                operation_duration = time.time() - operation_start_time
+                raise ResultCollectionError(
+                    f"Remote collection error from {node_name} after {operation_duration:.2f}s: {e}"
+                )
+
+        return collected_files
+
     def collect_service_logs(self, node_names: List[str], local_base_dir: Path,
                            collection_summary: CollectionSummary, scenario: Optional[Scenario] = None):
         """收集服务日志"""

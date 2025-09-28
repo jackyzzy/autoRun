@@ -107,8 +107,13 @@ class ResultCollector:
             # 1. 收集测试artifacts（如果有）
             if test_execution_result and test_execution_result.artifacts:
                 self.logger.info(f"Collecting {len(test_execution_result.artifacts)} test artifacts")
-                artifacts_summary = self.transporter.collect_artifacts_from_nodes(
-                    test_execution_result.artifacts, participating_nodes, scenario_result_dir
+
+                # 获取实际的测试执行节点
+                test_execution_node = scenario.metadata.test_execution.node if scenario.metadata and scenario.metadata.test_execution else "local"
+                artifacts_dir = scenario_result_dir / "artifacts"
+
+                artifacts_summary = self.transporter.collect_artifacts_from_test_node(
+                    test_execution_result.artifacts, test_execution_node, artifacts_dir
                 )
                 
                 # 更新收集摘要
