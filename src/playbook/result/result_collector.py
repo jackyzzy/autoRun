@@ -129,7 +129,7 @@ class ResultCollector:
             # 2. 根据模式收集额外信息
             if mode in [CollectionMode.STANDARD, CollectionMode.COMPREHENSIVE]:
                 # 收集服务日志
-                self.transporter.collect_service_logs(participating_nodes, scenario_result_dir, collection_summary)
+                self.transporter.collect_service_logs(participating_nodes, scenario_result_dir, collection_summary, scenario)
 
             if mode == CollectionMode.COMPREHENSIVE:
                 # 收集系统日志

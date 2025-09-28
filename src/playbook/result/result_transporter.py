@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime
 
 from ..node_manager import NodeManager
+from ..scenario_manager import Scenario
 from .result_models import CollectionTask, CollectionSummary
 from ...utils.exception_handler import with_exception_handling, result_collection
 
@@ -60,42 +61,95 @@ class ResultTransporter:
         return collection_summary
     
     def collect_service_logs(self, node_names: List[str], local_base_dir: Path,
-                           collection_summary: CollectionSummary):
+                           collection_summary: CollectionSummary, scenario: Optional[Scenario] = None):
         """收集服务日志"""
         self.logger.info(f"Collecting service logs from {len(node_names)} nodes")
-        
-        # Docker compose服务日志
-        compose_logs = [
-            "docker compose logs --no-color",
-            "docker compose ps -a"
+
+        # Docker compose服务日志配置
+        compose_commands = [
+            {"type": "logs", "params": {"lines": 2000}, "file_name": "compose_logs.txt"},
+            {"type": "ps", "params": {}, "file_name": "compose_status.txt"}
         ]
-        
+
         for node_name in node_names:
             node_dir = local_base_dir / node_name
             node_dir.mkdir(parents=True, exist_ok=True)
-            
+
             try:
-                for i, log_cmd in enumerate(compose_logs):
-                    log_name = f"compose_{'logs' if i == 0 else 'status'}.txt"
-                    
-                    results = self.node_manager.execute_command(
-                        log_cmd, [node_name], timeout=60
-                    )
-                    node_result = results.get(node_name)
-                    
-                    if node_result and node_result[0] == 0:
-                        log_file = node_dir / log_name
-                        with open(log_file, 'w', encoding='utf-8') as f:
-                            f.write(f"# Service log: {log_name} from {node_name}\\n")
-                            f.write(f"# Command: {log_cmd}\\n")
-                            f.write(f"# Collected at: {datetime.now().isoformat()}\\n\\n")
-                            f.write(node_result[1])
-                        
-                        # 更新统计
-                        log_size = log_file.stat().st_size
-                        collection_summary.total_files_collected += 1
-                        collection_summary.total_size_mb += log_size / (1024 * 1024)
-            
+                # 获取节点
+                node = self.node_manager.get_node(node_name)
+                if not node:
+                    self.logger.error(f"Node {node_name} not found")
+                    return False
+                
+                for cmd_config in compose_commands:
+                    try:
+                        # 获取 compose 文件信息
+                        compose_file = "docker-compose.yml"  # 默认值
+                        if scenario and scenario.metadata and scenario.metadata.services:
+                            # 使用第一个服务的 compose_file，假设所有服务使用相同的 compose 文件
+                            compose_file = scenario.metadata.services[0].compose_file
+
+                        # 构建命令参数，包含必需的 file 参数
+                        cmd_params = {
+                            "file": compose_file,
+                            **cmd_config["params"]
+                        }
+
+                        # 使用适配器构建版本兼容的命令
+                        compose_cmd = self.node_manager.build_compose_command(
+                            node_name,
+                            cmd_config["type"],
+                            **cmd_params
+                        )
+
+                        full_cmd = f"cd {node.docker_compose_path} && {compose_cmd.full_cmd}"
+
+                        # 对于 logs 命令，临时调整相关日志级别以避免控制台输出
+                        if cmd_config["type"] == "logs":
+                            # 临时提高相关日志级别，抑制大量日志输出
+                            ssh_logger = logging.getLogger(f"ssh.{node.host}")
+                            node_logger = logging.getLogger("playbook.node_manager")
+
+                            original_ssh_level = ssh_logger.level
+                            original_node_level = node_logger.level
+
+                            ssh_logger.setLevel(logging.ERROR)
+                            node_logger.setLevel(logging.WARNING)
+
+                            try:
+                                results = self.node_manager.execute_command(
+                                    full_cmd, [node_name], timeout=60
+                                )
+                            finally:
+                                # 恢复原始日志级别
+                                ssh_logger.setLevel(original_ssh_level)
+                                node_logger.setLevel(original_node_level)
+                        else:
+                            results = self.node_manager.execute_command(
+                                full_cmd, [node_name], timeout=60
+                            )
+                        node_result = results.get(node_name)
+
+                        if node_result and node_result[0] == 0:
+                            log_file = node_dir / cmd_config["file_name"]
+                            with open(log_file, 'w', encoding='utf-8') as f:
+                                f.write(f"# Service log: {cmd_config['file_name']} from {node_name}\\n")
+                                f.write(f"# Command: {compose_cmd.full_cmd}\\n")
+                                f.write(f"# Compose version: {compose_cmd.version.value}\\n")
+                                f.write(f"# Collected at: {datetime.now().isoformat()}\\n\\n")
+                                f.write(node_result[1])
+
+                            # 更新统计
+                            log_size = log_file.stat().st_size
+                            collection_summary.total_files_collected += 1
+                            collection_summary.total_size_mb += log_size / (1024 * 1024)
+
+                    except Exception as e:
+                        error_msg = f"Failed to collect {cmd_config['type']} from {node_name}: {e}"
+                        self.logger.warning(error_msg)
+                        collection_summary.collection_errors.append(error_msg)
+
             except Exception as e:
                 error_msg = f"Failed to collect service logs from {node_name}: {e}"
                 self.logger.warning(error_msg)
