@@ -111,7 +111,7 @@ class ResultReporter:
                 for error in collection_summary.collection_errors:
                     report_content += f"- {error}\\n"
 
-            markdown_file = result_dir / "test_report.md"
+            markdown_file = result_dir / "scenario_test_report.md"
             with open(markdown_file, 'w', encoding='utf-8') as f:
                 f.write(report_content)
 
@@ -653,17 +653,40 @@ class ResultReporter:
             else:
                 report_content += "- ⚠️ 健康检查信息不可用\n"
 
-            report_content += f"""
-## 📋 执行概况
+
+            # 验证结果（如果有）
+            if validation_results:
+                report_content += f"""
+## ✅ 配置验证结果
 
 """
+                for node_name, node_data in validation_results.items():
+                    # 节点总体状态
+                    if isinstance(node_data, dict):
+                        overall_status = node_data.get('overall_status', 'unknown')
+                        checks = node_data.get('checks', {})
 
-            # 执行摘要信息
-            if execution_summary:
-                for key, value in execution_summary.items():
-                    report_content += f"- **{key}**: {value}\n"
-            else:
-                report_content += "- ⚠️ 执行摘要信息不可用\n"
+                        # 节点状态图标
+                        node_icon = "✅" if overall_status in ['ready', 'passed', 'healthy'] else "❌"
+                        report_content += f"- {node_icon} **{node_name}**: {overall_status} ({len(checks)} 项检查)\n"
+
+                        # 详细检查结果
+                        for check_name, check_data in checks.items():
+                            if isinstance(check_data, dict):
+                                check_status = check_data.get('status', 'unknown')
+                                check_output = check_data.get('output', '')
+
+                                # 检查项图标
+                                check_icon = "✅" if check_status == 'passed' else "❌"
+
+                                # 提取关键信息
+                                formatted_info = self._extract_check_info(check_name, check_output)
+                                report_content += f"  - {check_icon} **{self._format_check_name(check_name)}**: {formatted_info}\n"
+                    else:
+                        # 简单值的情况（向后兼容）
+                        icon = "✅" if node_data in ['通过', 'passed', True] else "❌"
+                        report_content += f"- {icon} **{node_name}**: {node_data}\n"
+
 
             # 测试套件结果（如果有）
             if test_suite_summary:
@@ -706,15 +729,6 @@ class ResultReporter:
 
                     report_content += f"| {scenario_name} | {status_icon} {status} | {duration} | {result_files} | {result_size} | {successful_nodes} | {failed_nodes} | {error_msg} |\n"
 
-            # 验证结果（如果有）
-            if validation_results:
-                report_content += f"""
-## ✅ 配置验证结果
-
-"""
-                for key, value in validation_results.items():
-                    icon = "✅" if value in ['通过', 'passed', True] else "❌"
-                    report_content += f"- {icon} **{key}**: {value}\n"
 
             # 添加页脚信息
             report_content += f"""
@@ -735,6 +749,93 @@ class ResultReporter:
         except Exception as e:
             self.logger.error(f"Failed to generate execution overview report: {e}")
             raise
+
+    def _format_check_name(self, check_name: str) -> str:
+        """格式化检查项名称为用户友好的显示"""
+        name_mapping = {
+            'docker_version': 'Docker版本',
+            'gpu_info': 'GPU资源',
+            'disk_space': '磁盘空间',
+            'memory_info': '内存信息',
+            'benchmark_image': '镜像检查',
+            'docker_compose_version_node1': 'Docker Compose (node1)',
+            'docker_compose_version_node2': 'Docker Compose (node2)',
+            'docker_compose_version': 'Docker Compose'
+        }
+        return name_mapping.get(check_name, check_name.replace('_', ' ').title())
+
+    def _extract_check_info(self, check_name: str, check_output: str) -> str:
+        """从检查输出中提取关键信息"""
+        if not check_output:
+            return "无输出"
+
+        # Docker版本
+        if check_name == 'docker_version':
+            import re
+            match = re.search(r'Docker version (\S+)', check_output)
+            return match.group(1) if match else check_output.strip()
+
+        # GPU信息
+        elif check_name == 'gpu_info':
+            lines = check_output.strip().split('\n')
+            gpu_count = len([line for line in lines if 'NVIDIA' in line])
+            if gpu_count > 0:
+                # 提取GPU型号和内存
+                first_gpu = lines[0] if lines else ''
+                parts = first_gpu.split(', ')
+                if len(parts) >= 2:
+                    gpu_model = parts[0].replace('NVIDIA ', '')
+                    try:
+                        gpu_memory_mb = int(parts[1])
+                        gpu_memory = f"{gpu_memory_mb // 1024}GB"
+                    except ValueError:
+                        gpu_memory = parts[1]
+                    return f"{gpu_count}x {gpu_model} ({gpu_memory})"
+            return f"{gpu_count} GPU(s)"
+
+        # 磁盘空间
+        elif check_name == 'disk_space':
+            import re
+            # 解析 df 输出
+            match = re.search(r'(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)%', check_output)
+            if match:
+                size = match.group(2)
+                used = match.group(3)
+                usage = match.group(5)
+                return f"{size} 总容量 ({usage}% 使用)"
+            return "磁盘信息可用"
+
+        # 内存信息
+        elif check_name == 'memory_info':
+            import re
+            # 解析 free 命令输出
+            match = re.search(r'Mem:\s+(\S+)\s+(\S+)\s+(\S+)', check_output)
+            if match:
+                total = match.group(1)
+                used = match.group(2)
+                free = match.group(3)
+                return f"总计 {total}, 可用 {free}"
+            return "内存信息可用"
+
+        # Docker Compose版本
+        elif 'docker_compose_version' in check_name:
+            import re
+            match = re.search(r'version (\S+)', check_output)
+            return match.group(1) if match else check_output.strip()
+
+        # 镜像检查
+        elif check_name == 'benchmark_image':
+            if 'not found' in check_output.lower():
+                return "镜像不存在（正常）"
+            return check_output.strip()
+
+        # 默认情况
+        else:
+            # 截断过长的输出
+            output = check_output.strip()
+            if len(output) > 50:
+                return output[:50] + "..."
+            return output
 
     def archive_results(self, result_dir: str, archive_name: Optional[str] = None) -> str:
         """
