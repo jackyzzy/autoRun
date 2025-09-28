@@ -197,10 +197,6 @@ class ResultCollector:
 
         return list(participating_nodes)
 
-    # ==========================
-    # 向后兼容接口
-    # ==========================
-
     def generate_test_suite_summary(self, scenario_results: Dict[str, Any],
                                    execution_summary: dict,
                                    health_report: dict,
@@ -240,8 +236,6 @@ class ResultCollector:
         )
 
         # 汇总各场景的结果
-        total_throughput = 0.0
-        max_throughput = 0.0
         total_files = 0
         total_size = 0.0
         total_execution_time = 0.0
@@ -306,6 +300,7 @@ class ResultCollector:
         # 生成测试套件报告
         try:
             self.reporter.generate_suite_report(summary_dir, suite_summary)
+            self.reporter.generate_html_report(summary_dir, suite_summary)
         except Exception as e:
             self.logger.error(f"Failed to generate test suite report: {e}")
 

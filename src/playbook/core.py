@@ -222,7 +222,6 @@ class PlaybookCore:
             self.logger.info("Generating test suite summary from all scenario results")
             execution_summary = self.scenario_runner.get_execution_summary()
             health_report = self.health_checker.get_health_report()
-
             suite_summary = self.result_collector.generate_test_suite_summary(
                 scenario_results, execution_summary, health_report, suite_result_dir=suite_result_dir
             )
@@ -231,9 +230,16 @@ class PlaybookCore:
             execution_data = {
                 'execution_summary': execution_summary,
                 'health_report': health_report,
-                'test_suite_summary': suite_summary.to_dict(),
+                'test_suite_summary': suite_summary,
                 'validation_results': validation_results
             }
+
+            # 生成总体执行概览报告
+            try:
+                self.result_collector.reporter.generate_execution_overview_report(suite_result_dir, execution_data)
+                self.logger.info("Generated execution overview report (run-all-suite.md)")
+            except Exception as e:
+                self.logger.warning(f"Failed to generate execution overview report: {e}")
 
             self.logger.info("\n\nFull test suite execution completed successfully")
             return ExecutionResult(
