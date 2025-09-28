@@ -72,7 +72,7 @@ class ResultCollector:
             (scenario_result_dir / "artifacts").mkdir(exist_ok=True)
             (scenario_result_dir / "logs").mkdir(exist_ok=True)
             (scenario_result_dir / "metadata").mkdir(exist_ok=True)
-            (scenario_result_dir / "reports").mkdir(exist_ok=True)
+            (scenario_result_dir / "summary").mkdir(exist_ok=True)
             self.logger.info(f"Using custom result directory: {scenario_result_dir}")
         else:
             # 创建标准化的结果目录结构
@@ -183,7 +183,7 @@ class ResultCollector:
         (base_dir / "artifacts").mkdir(exist_ok=True)
         (base_dir / "logs").mkdir(exist_ok=True)
         (base_dir / "metadata").mkdir(exist_ok=True)
-        (base_dir / "reports").mkdir(exist_ok=True)
+        (base_dir / "summary").mkdir(exist_ok=True)
 
         return base_dir
 

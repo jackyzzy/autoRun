@@ -22,12 +22,12 @@ class ResultReporter:
     
     def save_result_summary(self, result_dir: Path, summary: ResultSummary):
         """保存结果摘要"""
-        summary_file = result_dir / "result_summary.json"
+        summary_file = result_dir / "summary" / "result_summary.json"
         with open(summary_file, 'w', encoding='utf-8') as f:
             json.dump(summary.to_dict(), f, indent=2, ensure_ascii=False)
         
         # 同时保存YAML格式
-        yaml_file = result_dir / "result_summary.yaml"
+        yaml_file = result_dir / "summary" / "result_summary.yaml"
         with open(yaml_file, 'w', encoding='utf-8') as f:
             yaml.dump(summary.to_dict(), f, default_flow_style=False, allow_unicode=True)
         
@@ -83,14 +83,14 @@ class ResultReporter:
             # 每个节点的收集结果
             if collection_summary.node_results:
                 report_content += "### 节点收集结果\\n\\n"
-                report_content += "| 节点名称 | 服务日志 | 系统日志 | 错误数 |\\n"
-                report_content += "|----------|----------|----------|----------|\\n"
+                report_content += "| 节点名称 | 服务日志 | 系统日志 | 错误数 |\n"
+                report_content += "|----------|----------|----------|----------|\n"
 
                 for node_name, node_info in collection_summary.node_results.items():
                     services = ', '.join(node_info.get('services_collected', []))
                     system_logs = '✓' if node_info.get('system_logs_collected', False) else '✗'
                     error_count = len(node_info.get('collection_errors', []))
-                    report_content += f"| {node_name} | {services} | {system_logs} | {error_count} |\\n"
+                    report_content += f"| {node_name} | {services} | {system_logs} | {error_count} |\n"
 
             # 性能指标（如果有）
             if summary.total_requests > 0:
@@ -107,9 +107,9 @@ class ResultReporter:
 
             # 错误信息
             if collection_summary.collection_errors:
-                report_content += "\\n## 收集错误\\n\\n"
+                report_content += "\n## 收集错误\n\n"
                 for error in collection_summary.collection_errors:
-                    report_content += f"- {error}\\n"
+                    report_content += f"- {error}\n"
 
             markdown_file = result_dir / "scenario_test_report.md"
             with open(markdown_file, 'w', encoding='utf-8') as f:
@@ -138,16 +138,16 @@ class ResultReporter:
 """
 
             for node_name, node_info in collection_summary.node_results.items():
-                report_content += f"\\n{node_name}:"
-                report_content += f"\\n  服务日志: {', '.join(node_info.get('services_collected', []))}"
-                report_content += f"\\n  系统日志: {'Yes' if node_info.get('system_logs_collected', False) else 'No'}"
+                report_content += f"\n{node_name}:"
+                report_content += f"\n  服务日志: {', '.join(node_info.get('services_collected', []))}"
+                report_content += f"\n  系统日志: {'Yes' if node_info.get('system_logs_collected', False) else 'No'}"
                 if node_info.get('collection_errors'):
-                    report_content += f"\\n  错误: {'; '.join(node_info['collection_errors'])}"
+                    report_content += f"\n  错误: {'; '.join(node_info['collection_errors'])}"
 
             if collection_summary.collection_errors:
-                report_content += "\\n\\n全局错误:\\n"
+                report_content += "\n\n全局错误:\n"
                 for error in collection_summary.collection_errors:
-                    report_content += f"- {error}\\n"
+                    report_content += f"- {error}\n"
 
             collection_report_file = result_dir / "collection_report.txt"
             with open(collection_report_file, 'w', encoding='utf-8') as f:

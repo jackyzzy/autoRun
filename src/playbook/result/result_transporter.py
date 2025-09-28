@@ -3,20 +3,19 @@
 负责处理测试结果文件的传输、下载和文件操作
 """
 
-import os
 import logging
 import shutil
 import warnings
 import time
 import hashlib
-from typing import Dict, List, Optional, Any
+from typing import List, Optional
 from pathlib import Path
 from datetime import datetime
 
 from ..node_manager import NodeManager
 from ..scenario_manager import Scenario
 from .result_models import CollectionTask, CollectionSummary
-from ...utils.exception_handler import with_exception_handling, result_collection
+from ...utils.exception_handler import result_collection
 from ..exceptions import ResultCollectionError
 
 
@@ -226,7 +225,7 @@ class ResultTransporter:
 
         # 预检查目录权限
         if not self._ensure_writable_directory(artifacts_dir):
-            raise ResultCollectionError(f"Cannot create writable artifacts directory: {artifacts_dir}")
+            raise ResultCollectionError("local", str(artifacts_dir), "Cannot create writable directory")
 
         for artifact_path in artifacts:
             start_time = time.time()
@@ -240,12 +239,12 @@ class ResultTransporter:
                 if source_path.is_file():
                     file_size = source_path.stat().st_size
                     if not self._check_disk_space(artifacts_dir, file_size):
-                        raise ResultCollectionError(f"Insufficient disk space for {artifact_path}")
+                        raise ResultCollectionError("local", artifact_path, "Insufficient disk space")
                 elif source_path.is_dir():
                     # 估算目录大小
                     dir_size = sum(f.stat().st_size for f in source_path.rglob('*') if f.is_file())
                     if not self._check_disk_space(artifacts_dir, dir_size):
-                        raise ResultCollectionError(f"Insufficient disk space for directory {artifact_path}")
+                        raise ResultCollectionError("local", artifact_path, "Insufficient disk space for directory")
 
                 # 计算目标文件路径
                 artifact_name = source_path.name
@@ -272,7 +271,7 @@ class ResultTransporter:
                 if source_path.is_file() and not self._verify_file_integrity(source_path, target_file):
                     # 清理损坏的文件
                     target_file.unlink(missing_ok=True)
-                    raise ResultCollectionError(f"File integrity check failed: {artifact_path}")
+                    raise ResultCollectionError("local", str(source_path), "File integrity check failed")
 
                 collected_files.append(str(target_file))
 
@@ -322,11 +321,11 @@ class ResultTransporter:
 
         # 预检查目录权限
         if not self._ensure_writable_directory(artifacts_dir):
-            raise ResultCollectionError(f"Cannot create writable artifacts directory: {artifacts_dir}")
+            raise ResultCollectionError(node_name, str(artifacts_dir), "Cannot create writable directory")
 
         node = self.node_manager.get_node(node_name)
         if not node:
-            raise ResultCollectionError(f"Node not found: {node_name}")
+            raise ResultCollectionError(node_name, "<node_lookup>", "Node not found")
 
         max_retries = 3
         retry_delay = 2  # 秒
@@ -387,13 +386,16 @@ class ResultTransporter:
                 else:
                     operation_duration = time.time() - operation_start_time
                     raise ResultCollectionError(
-                        f"Remote collection failed from {node_name} after {max_retries} retries "
-                        f"(total time: {operation_duration:.2f}s): {e}"
+                        node_name,
+                        "<artifacts_collection>",
+                        f"Failed after {max_retries} retries (total time: {operation_duration:.2f}s): {e}"
                     )
             except Exception as e:
                 operation_duration = time.time() - operation_start_time
                 raise ResultCollectionError(
-                    f"Remote collection error from {node_name} after {operation_duration:.2f}s: {e}"
+                    node_name,
+                    "<artifacts_collection>",
+                    f"Collection error after {operation_duration:.2f}s: {e}"
                 )
 
         return collected_files
@@ -410,7 +412,7 @@ class ResultTransporter:
         ]
 
         for node_name in node_names:
-            node_dir = local_base_dir / node_name
+            node_dir = local_base_dir / "logs" / node_name
             node_dir.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -507,7 +509,7 @@ class ResultTransporter:
         }
         
         for node_name in node_names:
-            node_dir = local_base_dir / node_name
+            node_dir = local_base_dir / "logs" / node_name
             node_dir.mkdir(parents=True, exist_ok=True)
             
             try:
