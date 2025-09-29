@@ -243,7 +243,7 @@ class ScenarioRunner:
         for attempt in range(self.retry_count + 1):
             try:
                 if attempt > 0:
-                    self.logger.info(f"Retrying scenario {scenario_name} (attempt {attempt + 1})")
+                    self.logger.info(f"\n\nRetrying scenario {scenario_name} (attempt {attempt + 1})")
                     scenario_logger.info(f"Retry attempt {attempt + 1}")
                 
                 result.start()
@@ -263,14 +263,13 @@ class ScenarioRunner:
                 
                 if attempt < self.retry_count:
                     self.logger.warning(f"Scenario {scenario_name} failed, will retry: {error_msg}")
-                    
                     # 重试前强制清理状态
                     self._cleanup_before_retry(scenario_name, attempt + 1, scenario_logger)
-                    
                     continue
                 else:
                     result.fail(error_msg)
                     self.logger.error(f"Scenario {scenario_name} failed after {self.retry_count + 1} attempts")
+                    self._cleanup_scenario_services(scenario_name, reason="final_failure_cleanup")
                     break
         
         # 完成回调
@@ -284,6 +283,17 @@ class ScenarioRunner:
         logger.info("Cleaning up before retry...")
         
         try:
+            # 0. 清理Docker服务
+            logger.info("Cleaning up Docker services before retry...")
+            service_cleanup_success = self._cleanup_scenario_services(
+                _scenario_name,
+                reason=f"retry_cleanup_attempt_{attempt}"
+            )
+            if not service_cleanup_success:
+                logger.warning("⚠️ Service cleanup had issues, but continuing with retry...")
+            else:
+                logger.info("✅ Service cleanup completed successfully")
+
             # 1. 强制清理SSH连接池
             logger.info("Clearing SSH connections...")
             from ..utils.ssh_client import ssh_pool
@@ -301,7 +311,7 @@ class ScenarioRunner:
                 
                 # 4. 重新验证节点连通性（不使用缓存）
                 logger.info("Re-verifying node connectivity...")
-                connectivity = self.node_manager.test_connectivity(use_cache=False)
+                connectivity = self.node_manager.test_connectivity(force_refresh=True)
                 connected_count = sum(connectivity.values()) if isinstance(connectivity, dict) else 0
                 total_count = len(connectivity) if isinstance(connectivity, dict) else 0
                 
@@ -312,7 +322,7 @@ class ScenarioRunner:
                             logger.warning(f"Node {node_name} is not connected")
                 else:
                     logger.info(f"All {total_count} nodes are connected")
-            
+
             # 5. 添加指数退避重试延迟
             retry_delay = min(30 * (2 ** (attempt - 1)), 120)  # 30s, 60s, 120s (最大2分钟)
             logger.info(f"Waiting {retry_delay}s before retry attempt {attempt}...")
@@ -623,42 +633,53 @@ class ScenarioRunner:
             # 🚨 双重保险：紧急停止当前场景的已部署服务
             self._emergency_stop_current_scenario_services()
 
-    def _emergency_stop_current_scenario_services(self):
-        """紧急停止当前场景服务 - 双重保险机制"""
-        if not self.current_scenario:
-            return
+    def _cleanup_scenario_services(self, scenario_name: str, reason: str = "cleanup") -> bool:
+        """通用的场景服务清理方法 - 复用 cancel 流程的清理逻辑"""
+        if not scenario_name:
+            return False
 
         try:
-            scenario = self.scenario_manager.get_scenario(self.current_scenario)
+            scenario = self.scenario_manager.get_scenario(scenario_name)
             if not (scenario and scenario.metadata and scenario.metadata.services):
-                return
+                return True  # 没有服务需要清理
 
-            self.logger.warning(f"🚨 Emergency stopping services for cancelled scenario: {self.current_scenario}")
+            self.logger.info(f"🧹 Cleaning up services for scenario: {scenario_name} (reason: {reason})")
 
-            # 🎯 主要方案：智能依赖清理
+            # 🎯 主要方案：智能依赖清理 (复用现有逻辑)
             if (hasattr(self, 'dependency_resolver') and self.dependency_resolver and
                 hasattr(self.dependency_resolver, 'get_deployment_batches')):
 
                 try:
                     batches = self.dependency_resolver.get_deployment_batches()
-                    if batches:  # 确保有有效的批次数据
+                    if batches:
                         self.logger.info("✅ Using intelligent dependency-based cleanup")
                         reversed_batches = list(reversed(batches))
                         asyncio.run(self._emergency_stop_services_concurrent(
                             reversed_batches, Path(scenario.directory), self.logger
                         ))
-                        return
+                        return True
                     else:
                         self.logger.warning("⚠️ Dependency batches empty, falling back to force cleanup")
                 except Exception as e:
                     self.logger.warning(f"⚠️ Dependency-based cleanup failed: {e}, falling back to force cleanup")
 
-            # 🛡️ 备用方案：强制全清理
+            # 🛡️ 备用方案：强制全清理 (复用现有逻辑)
             self.logger.warning("🔧 Using fallback force cleanup method")
             self._emergency_stop_services_force(scenario, Path(scenario.directory))
+            return True
 
         except Exception as e:
-            self.logger.error(f"❌ Emergency service cleanup completely failed: {e}")
+            self.logger.error(f"❌ Service cleanup failed for {scenario_name}: {e}")
+            return False
+
+    def _emergency_stop_current_scenario_services(self):
+        """紧急停止当前场景服务 - 复用通用清理方法"""
+        if not self.current_scenario:
+            return
+
+        success = self._cleanup_scenario_services(self.current_scenario, "emergency_cancel")
+        if not success:
+            self.logger.error(f"❌ Emergency service cleanup completely failed for {self.current_scenario}")
 
     async def _emergency_stop_services_concurrent(self, batches, scenario_path, logger):
         """智能并发紧急停止服务（主要方案）"""

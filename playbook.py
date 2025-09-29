@@ -308,6 +308,10 @@ def run(ctx, scenario_name, all, dry_run):
                 console.print(f"Total scenarios: {summary['total']}")
                 console.print(f"Completed: {summary['completed']}")
                 console.print(f"Failed: {summary['failed']}")
+                if summary.get('skipped', 0) > 0:
+                    console.print(f"[yellow]Skipped: {summary['skipped']}[/yellow]")
+                if summary.get('cancelled', 0) > 0:
+                    console.print(f"[dim]Cancelled: {summary['cancelled']}[/dim]")
             else:
                 console.print(f"[red]✗ Test suite failed: {results.error or 'Unknown error'}[/red]")
                 
