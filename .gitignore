@@ -121,7 +121,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-config.online
+config.0410/
+config.055
 
 # Spyder project settings
 .spyderproject

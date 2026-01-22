@@ -29,7 +29,7 @@ docker run -it --rm \
   --ipc=host \
   --privileged=true \
   -v "${SCENARIO_RESULT_PATH}:/benchmark/data/results" \
-  sangfor.com/aicp-benchmark:v0.0.6 \
+  jacky.com/benchmark:v0.0.6 \
   --base-url "${BASE_URL}" \
   --model "${MODEL}" \
   --tokenizer-path ./tokenizer \
