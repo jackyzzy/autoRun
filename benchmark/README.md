@@ -82,7 +82,7 @@ docker run -it --rm \
 --network=host \
 --ipc=host \
 --privileged=true \
--v /home/zjwei/result:/workspace/result \
+-v /home/data/result:/workspace/result \
 benchmark:v0.1 \
 benchmark --model /data/Qwen3-235B-A22B-Instruct-2507-FP8 \
 --base-url http://127.0.0.1:30007 \
