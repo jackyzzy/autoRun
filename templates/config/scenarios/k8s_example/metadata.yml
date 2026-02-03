@@ -1,0 +1,80 @@
+# K8S场景配置模板
+# 展示如何在Playbook中配置Kubernetes部署
+
+name: "k8s_example"
+description: "Kubernetes部署示例场景"
+version: "1.0"
+tags: ["kubernetes", "example"]
+estimated_duration: 600
+
+services:
+  # K8S服务部署示例
+  - name: "example-app"
+    # kubectl配置 - 定义部署步骤
+    kubectl:
+      # 部署步骤 - 按顺序执行
+      steps:
+        # 第1步：创建ConfigMap
+        - name: "创建ConfigMap"
+          manifest: "configmap.yaml"
+          check:
+            type: "resource_exists"
+            kind: "ConfigMap"
+            name: "example-config"
+
+        # 第2步：部署应用
+        - name: "部署应用"
+          manifest: "deployment.yaml"
+          check:
+            type: "deployment_ready"
+            name: "example-app"
+            replicas: 2
+            timeout: 300
+
+        # 第3步：创建Service
+        - name: "创建Service"
+          manifest: "service.yaml"
+          check:
+            type: "resource_exists"
+            kind: "Service"
+            name: "example-service"
+
+      # 指定命名空间（可选，覆盖集群默认值）
+      namespace: "example-ns"
+
+    # 部署到的K8S集群（对应nodes.yaml中kubernetes section下的名称）
+    nodes: ["k8s_prod"]
+    depends_on: []
+
+    # 健康检查配置
+    health_check:
+      enabled: true
+      strategy: "kubernetes"
+      startup_timeout: 300
+      startup_grace_period: 30
+      check_interval: 10
+      max_retries: 30
+      checks:
+        # Pod就绪检查
+        - type: "pod_ready"
+          selector: "app=example-app"
+          min_ready: 2
+          required: true
+        # HTTP健康检查（可选）
+        - type: "http_endpoint"
+          url: "http://example-service:8080/health"
+          expected_status: 200
+          required: false
+      failure_action: "retry"
+      retry_delay: 10
+
+# 测试执行配置
+test_execution:
+  # 测试脚本执行节点（可以是Docker节点或K8S节点）
+  node: "k8s_prod"
+  script: "run_test.sh"
+  timeout: 600
+  result_paths:
+    - "/tmp/k8s_test_results"
+  collection_mode: "standard"
+  wait_for_all_services: true

@@ -274,10 +274,11 @@ class PlaybookCore:
         try:
             scenario = self.scenario_manager.get_scenario(scenario_name)
             if not scenario:
+                available = [s.name for s in self.scenario_manager.get_scenarios(enabled_only=False)]
                 return ExecutionResult(
                     status='failed',
                     error=f'Scenario not found: {scenario_name}',
-                    data={'available_scenarios': list(self.scenario_manager.get_scenarios().keys())}
+                    data={'available_scenarios': available}
                 )
         except Exception as e:
             self.logger.error(f"Failed to load scenario {scenario_name}: {e}")

@@ -35,6 +35,7 @@ from ..utils.common import (
 from ..utils.exception_handler import (
     with_exception_handling, node_operation, safe_execute, exception_context
 )
+from typing import Union
 
 
 class Node:
@@ -118,6 +119,10 @@ class NodeManager:
         self.nodes: Dict[str, Node] = {}
         self.config_file = config_file
 
+        # K8S集群配置 (NEW)
+        from .k8s_cluster import K8SCluster
+        self.kubernetes: Dict[str, 'K8SCluster'] = {}
+
         # 连通性缓存配置
         self.connectivity_cache: Dict[str, Tuple[bool, datetime]] = {}
         self.connectivity_cache_ttl = 300  # 缓存TTL: 5分钟
@@ -130,10 +135,20 @@ class NodeManager:
             self.load_config(config_file)
     
     def load_config(self, config_file: str):
-        """加载节点配置"""
+        """加载节点配置
+
+        从YAML配置文件加载节点和K8S集群配置。
+        配置文件支持两个顶级section: 'nodes' 和 'kubernetes'。
+
+        Args:
+            config_file: 配置文件路径
+        """
+        from .k8s_cluster import K8SCluster
+
         with ContextTimer(self.logger, f"Loading node configuration from {config_file}"):
             config = load_yaml_config(config_file, required=True)
 
+            # 加载传统节点配置
             self.nodes.clear()
             nodes_config = config.get('nodes', {})
 
@@ -150,6 +165,25 @@ class NodeManager:
                 self.logger.debug(f"Loaded node: {node_name} ({node.host})")
 
             self.logger.info(f"Successfully loaded {len(self.nodes)} nodes")
+
+            # 加载K8S集群配置 (NEW)
+            self.kubernetes.clear()
+            k8s_config = config.get('kubernetes', {})
+
+            for cluster_name, cluster_config in k8s_config.items():
+                # 验证必需字段
+                validate_required_fields(
+                    cluster_config,
+                    ['host', 'username'],
+                    f"kubernetes cluster '{cluster_name}'"
+                )
+
+                cluster = K8SCluster(cluster_name, cluster_config)
+                self.kubernetes[cluster_name] = cluster
+                self.logger.debug(f"Loaded K8S cluster: {cluster_name} ({cluster.host})")
+
+            if self.kubernetes:
+                self.logger.info(f"Successfully loaded {len(self.kubernetes)} K8S clusters")
     
     def add_node(self, name: str, host: str, username: str, **kwargs) -> Node:
         """添加节点"""
@@ -174,8 +208,107 @@ class NodeManager:
     def get_node(self, name: str) -> Optional[Node]:
         """获取节点"""
         return self.nodes.get(name)
-    
-    def get_nodes(self, tags: List[str] = None, role: str = None, 
+
+    def get_k8s_cluster(self, name: str) -> Optional['K8SCluster']:
+        """获取K8S集群
+
+        Args:
+            name: 集群名称
+
+        Returns:
+            K8SCluster实例，如果不存在则返回None
+        """
+        from .k8s_cluster import K8SCluster
+        return self.kubernetes.get(name)
+
+    def get_k8s_clusters(self, tags: List[str] = None,
+                        enabled_only: bool = True) -> List['K8SCluster']:
+        """获取符合条件的K8S集群列表
+
+        Args:
+            tags: 要过滤的标签列表
+            enabled_only: 是否只返回启用的集群
+
+        Returns:
+            K8SCluster列表
+        """
+        from .k8s_cluster import K8SCluster
+        clusters = []
+
+        for cluster in self.kubernetes.values():
+            if enabled_only and not cluster.enabled:
+                continue
+            if tags and not any(tag in cluster.tags for tag in tags):
+                continue
+            clusters.append(cluster)
+
+        return clusters
+
+    def get_resource(self, name: str) -> Union[Node, 'K8SCluster']:
+        """统一获取资源（节点或K8S集群）
+
+        根据名称自动识别并返回对应的Node或K8SCluster实例。
+
+        Args:
+            name: 资源名称
+
+        Returns:
+            Node或K8SCluster实例
+
+        Raises:
+            ValueError: 如果资源不存在
+        """
+        from .k8s_cluster import K8SCluster
+        if name in self.nodes:
+            return self.nodes[name]
+        if name in self.kubernetes:
+            return self.kubernetes[name]
+        raise ValueError(f"Resource not found: {name}. "
+                        f"Available nodes: {list(self.nodes.keys())}, "
+                        f"Available K8S clusters: {list(self.kubernetes.keys())}")
+
+    def is_k8s_cluster(self, name: str) -> bool:
+        """判断资源是否为K8S集群
+
+        Args:
+            name: 资源名称
+
+        Returns:
+            True如果是K8S集群，否则False
+        """
+        return name in self.kubernetes
+
+    def is_node(self, name: str) -> bool:
+        """判断资源是否为普通节点
+
+        Args:
+            name: 资源名称
+
+        Returns:
+            True如果是普通节点，否则False
+        """
+        return name in self.nodes
+
+    def resource_exists(self, name: str) -> bool:
+        """检查资源是否存在
+
+        Args:
+            name: 资源名称
+
+        Returns:
+            True如果资源存在（节点或K8S集群），否则False
+        """
+        return name in self.nodes or name in self.kubernetes
+
+    def get_all_resource_names(self) -> List[str]:
+        """获取所有资源名称（节点和K8S集群）
+
+        Returns:
+            所有资源名称列表
+        """
+        return list(self.nodes.keys()) + list(self.kubernetes.keys())
+
+    def get_nodes(self, tags: List[str] = None, role: str = None,
                   enabled_only: bool = True) -> List[Node]:
         """获取符合条件的节点列表"""
         nodes = []
@@ -286,16 +419,26 @@ class NodeManager:
     def execute_command(self, command: str, node_names: Optional[List[str]] = None,
                        parallel: bool = True, timeout: int = 300,
                        stop_on_error: bool = False) -> Dict[str, Tuple[int, str, str]]:
-        """在节点上执行命令"""
+        """在节点上执行命令（支持Docker节点和K8S集群）"""
         if node_names is None:
             node_names = self.get_node_names(enabled_only=True)
-        
+
         results = {}
-        
+
         def execute_on_node(node_name: str) -> Tuple[str, Tuple[int, str, str]]:
             try:
-                node = self.nodes[node_name]
-                client = node.get_ssh_client()
+                # 优先检查Docker节点
+                if node_name in self.nodes:
+                    node = self.nodes[node_name]
+                    client = node.get_ssh_client()
+                # 再检查K8S集群
+                elif node_name in self.kubernetes:
+                    cluster = self.kubernetes[node_name]
+                    client = cluster.get_ssh_client()
+                else:
+                    self.logger.error(f"Node or K8S cluster {node_name} not found")
+                    return node_name, (-1, "", f"Node or K8S cluster {node_name} not found")
+
                 with client.connection_context():
                     result = client.execute_command(
                         command, timeout=timeout, check_exit_code=False

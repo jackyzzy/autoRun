@@ -58,32 +58,45 @@ class ServiceHealthCheck:
         return {k: v for k, v in self.__dict__.items() if v is not None}
 
 
-@dataclass 
+@dataclass
 class ServiceDeployment:
-    """服务部署配置"""
+    """服务部署配置（支持Docker Compose和K8S）"""
     name: str
     compose_file: str = "docker-compose.yml"
     nodes: List[str] = field(default_factory=list)
     depends_on: List[str] = field(default_factory=list)
     health_check: ServiceHealthCheck = field(default_factory=ServiceHealthCheck)
-    
+    # K8S部署配置 (NEW)
+    kubectl: Optional[Dict[str, Any]] = None
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any], global_defaults: Dict[str, Any] = None) -> 'ServiceDeployment':
         data_copy = data.copy()
         health_check_data = data_copy.pop('health_check', {})
+        # 提取kubectl配置 (NEW)
+        kubectl_data = data_copy.pop('kubectl', None)
         service = cls(**{k: v for k, v in data_copy.items() if k in cls.__dataclass_fields__})
         service.health_check = ServiceHealthCheck.from_dict(health_check_data, global_defaults)
+        service.kubectl = kubectl_data
         return service
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典"""
-        return {
+        result = {
             'name': self.name,
             'compose_file': self.compose_file,
             'nodes': self.nodes,
             'depends_on': self.depends_on,
             'health_check': self.health_check.to_dict()
         }
+        # 添加kubectl配置 (NEW)
+        if self.kubectl:
+            result['kubectl'] = self.kubectl
+        return result
+
+    def is_k8s_service(self) -> bool:
+        """判断是否为K8S服务"""
+        return self.kubectl is not None
 
 
 @dataclass
@@ -335,11 +348,24 @@ class Scenario:
     
     @property
     def is_valid(self) -> bool:
-        """检查场景是否有效"""
+        """检查场景是否有效
+
+        支持两种场景类型:
+        1. Docker Compose场景: 有docker-compose.yml文件
+        2. K8S场景: 有manifests/目录
+        """
         scenario_path = self.full_path
-        return (scenario_path.exists() and 
-                scenario_path.is_dir() and
-                (self._find_docker_compose_file(scenario_path) is not None))
+        if not scenario_path.exists() or not scenario_path.is_dir():
+            return False
+
+        # 检查是否有docker-compose文件
+        has_docker_compose = self._find_docker_compose_file(scenario_path) is not None
+
+        # 检查是否有manifests目录 (K8S场景)
+        manifests_dir = scenario_path / "manifests"
+        has_manifests = manifests_dir.exists() and manifests_dir.is_dir()
+
+        return has_docker_compose or has_manifests
     
     def get_docker_compose_path(self) -> str:
         """获取docker-compose文件路径"""
@@ -514,21 +540,30 @@ class ScenarioManager:
         self._set_execution_order(discovered_scenarios)
     
     def _create_scenario_from_directory(self, directory: Path) -> Optional[Scenario]:
-        """从目录创建场景对象"""
+        """从目录创建场景对象
+
+        支持两种场景类型:
+        1. Docker Compose场景: 有docker-compose.yml文件
+        2. K8S场景: 有manifests/目录或metadata中定义了kubectl配置
+        """
         try:
             # 检查是否有必需的文件
             docker_compose_file = self._find_docker_compose_file(directory)
-            if not docker_compose_file:
-                self.logger.debug(f"Skipping {directory}: no docker-compose file found")
+            manifests_dir = directory / "manifests"
+            is_k8s_scenario = manifests_dir.exists() and manifests_dir.is_dir()
+
+            # 既不是Docker Compose场景也不是K8S场景
+            if not docker_compose_file and not is_k8s_scenario:
+                self.logger.debug(f"Skipping {directory}: no docker-compose file or manifests directory found")
                 return None
-            
+
             # 创建基本场景信息
             scenario_name = directory.name
             scenario = Scenario(
                 name=scenario_name,
                 directory=str(directory)
             )
-            
+
             # 加载元数据
             metadata_file = self._find_metadata_file(directory)
             if metadata_file:
@@ -540,12 +575,20 @@ class ScenarioManager:
                         self.global_config_manager.global_defaults
                     )
                     scenario.description = scenario.metadata.description
+
+                    # 使用metadata中定义的name作为场景名称（如果存在且不同）
+                    if scenario.metadata.name and scenario.metadata.name != scenario_name:
+                        # 保留原目录名但用metadata中的名称作为别名
+                        self.logger.debug(f"Scenario {scenario_name} has metadata name: {scenario.metadata.name}")
                 except Exception as e:
                     self.logger.warning(f"Failed to load metadata for {scenario_name}: {e}")
-            
-            self.logger.debug(f"Created scenario: {scenario_name}")
+
+            if is_k8s_scenario and not docker_compose_file:
+                self.logger.debug(f"Created K8S scenario: {scenario_name}")
+            else:
+                self.logger.debug(f"Created scenario: {scenario_name}")
             return scenario
-            
+
         except Exception as e:
             self.logger.error(f"Failed to create scenario from {directory}: {e}")
             return None

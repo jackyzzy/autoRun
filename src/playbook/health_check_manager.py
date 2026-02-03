@@ -1,12 +1,14 @@
 """
 服务健康检查管理器
 提供多层次的服务健康检查机制
+支持Docker和Kubernetes两种部署平台
 """
 
+import json
 import time
 import logging
 import requests
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,10 +21,17 @@ from ..utils.progress_logger import EnhancedProgressLogger
 
 class HealthCheckType(Enum):
     """健康检查类型"""
+    # Docker相关检查
     DOCKER_STATUS = "docker_status"
-    DOCKER_HEALTH = "docker_health" 
+    DOCKER_HEALTH = "docker_health"
+    # 通用检查
     HTTP_ENDPOINT = "http_endpoint"
     CUSTOM_SCRIPT = "custom_script"
+    # Kubernetes相关检查
+    POD_READY = "pod_ready"
+    DEPLOYMENT_READY = "deployment_ready"
+    RESOURCE_EXISTS = "resource_exists"
+    SERVICE_ENDPOINTS = "service_endpoints"
 
 
 @dataclass
@@ -42,13 +51,20 @@ class HealthCheckResult:
 
 
 class ServiceHealthChecker:
-    """单个服务的健康检查器"""
-    
+    """单个服务的健康检查器
+
+    支持Docker和Kubernetes两种部署平台的健康检查。
+    根据service的配置自动选择合适的检查方法。
+    """
+
     def __init__(self, service: ServiceDeployment, node_manager: NodeManager):
         self.service = service
         self.node_manager = node_manager
         self.logger = logging.getLogger(f"playbook.health_checker.{service.name}")
         self.container_service = DockerContainerService(node_manager)
+
+        # K8S相关延迟导入，避免循环引用
+        self._k8s_cluster_cache: Dict[str, Any] = {}
         
         
     def check_docker_status(self, node_name: str) -> HealthCheckResult:
@@ -115,28 +131,36 @@ class ServiceHealthChecker:
             )
     
     def check_http_endpoint(self, node_name: str, check_config: Dict[str, Any]) -> HealthCheckResult:
-        """检查HTTP端点"""
+        """检查HTTP端点
+
+        支持Docker节点和K8S集群。对于K8S集群，可以检查NodePort或LoadBalancer服务。
+        """
         start_time = time.time()
-        
+
         try:
-            # 获取节点信息构建URL
+            # 获取节点/集群信息构建URL
             node = self.node_manager.get_node(node_name)
-            if not node:
+            cluster = self._get_k8s_cluster(node_name) if not node else None
+
+            if not node and not cluster:
                 return HealthCheckResult(
                     check_type=HealthCheckType.HTTP_ENDPOINT.value,
                     service_name=self.service.name,
                     node_name=node_name,
                     success=False,
-                    message=f"Node {node_name} not found",
+                    message=f"Node or K8S cluster {node_name} not found",
                     duration=time.time() - start_time
                 )
-            
-            # 构建URL，替换localhost为实际节点IP
+
+            # 获取主机地址（支持Docker节点和K8S集群）
+            host = node.host if node else cluster.host
+
+            # 构建URL，替换localhost为实际节点/集群IP
             url = check_config.get('url', '')
             if url.startswith('http://localhost'):
-                url = url.replace('localhost', node.host)
+                url = url.replace('localhost', host)
             elif url.startswith('http://127.0.0.1'):
-                url = url.replace('127.0.0.1', node.host)
+                url = url.replace('127.0.0.1', host)
             
             method = check_config.get('method', 'GET').upper()
             expected_status = check_config.get('expected_status', 200)
@@ -196,7 +220,469 @@ class ServiceHealthChecker:
                 message=f"HTTP endpoint check failed: {str(e)}",
                 duration=time.time() - start_time
             )
-    
+
+    # ==================== K8S 健康检查方法 ====================
+
+    def _get_k8s_cluster(self, node_name: str):
+        """获取K8S集群对象
+
+        Args:
+            node_name: 集群名称
+
+        Returns:
+            K8SCluster对象，如果不是K8S集群则返回None
+        """
+        if node_name in self._k8s_cluster_cache:
+            return self._k8s_cluster_cache[node_name]
+
+        cluster = self.node_manager.get_k8s_cluster(node_name)
+        self._k8s_cluster_cache[node_name] = cluster
+        return cluster
+
+    def _execute_kubectl(self, cluster, cmd: str) -> tuple:
+        """执行kubectl命令
+
+        Args:
+            cluster: K8SCluster对象
+            cmd: 要执行的命令
+
+        Returns:
+            tuple: (success, stdout, stderr)
+        """
+        try:
+            ssh_client = cluster.get_ssh_client()
+            result = ssh_client.execute_command(cmd)
+
+            if hasattr(result, 'exit_status'):
+                # 新版SSH返回对象
+                return result.exit_status == 0, result.stdout or '', result.stderr or ''
+            elif isinstance(result, tuple):
+                # 兼容旧版返回元组
+                return result[0] == 0, result[1] or '', result[2] or ''
+            else:
+                # 直接返回stdout
+                return True, str(result), ''
+        except Exception as e:
+            self.logger.error(f"kubectl command failed: {cmd}, error: {e}")
+            return False, '', str(e)
+
+    def _get_service_namespace(self) -> str:
+        """获取服务的命名空间"""
+        if self.service.kubectl:
+            return self.service.kubectl.get('namespace', 'default')
+        return 'default'
+
+    def check_pod_ready(self, node_name: str, check_config: Dict[str, Any]) -> HealthCheckResult:
+        """检查Pod是否就绪
+
+        Args:
+            node_name: K8S集群名称
+            check_config: 检查配置，包含:
+                - selector: Pod标签选择器 (如 "app=myapp")
+                - min_ready: 最少就绪Pod数量 (默认1)
+                - timeout: 超时时间秒数 (默认60)
+
+        Returns:
+            HealthCheckResult: 检查结果
+        """
+        start_time = time.time()
+
+        try:
+            cluster = self._get_k8s_cluster(node_name)
+            if not cluster:
+                return HealthCheckResult(
+                    check_type=HealthCheckType.POD_READY.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message=f"Node {node_name} is not a K8S cluster",
+                    duration=time.time() - start_time
+                )
+
+            selector = check_config.get('selector', '')
+            min_ready = check_config.get('min_ready', 1)
+            namespace = check_config.get('namespace') or self._get_service_namespace()
+
+            # 构建kubectl命令获取Pod状态
+            cmd = cluster.build_kubectl_command(
+                'get', namespace=namespace,
+                extra_args=['pods', '-l', selector, '-o', 'json']
+            )
+
+            success, stdout, stderr = self._execute_kubectl(cluster, cmd)
+
+            if not success:
+                return HealthCheckResult(
+                    check_type=HealthCheckType.POD_READY.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message=f"Failed to get pods: {stderr}",
+                    duration=time.time() - start_time
+                )
+
+            # 解析JSON输出
+            pods_data = json.loads(stdout)
+            pods = pods_data.get('items', [])
+
+            # 统计就绪的Pod数量
+            ready_count = 0
+            pod_statuses = []
+
+            for pod in pods:
+                pod_name = pod.get('metadata', {}).get('name', 'unknown')
+                pod_phase = pod.get('status', {}).get('phase', 'Unknown')
+
+                # 检查所有容器是否就绪
+                conditions = pod.get('status', {}).get('conditions', [])
+                is_ready = False
+                for condition in conditions:
+                    if condition.get('type') == 'Ready' and condition.get('status') == 'True':
+                        is_ready = True
+                        break
+
+                if is_ready and pod_phase == 'Running':
+                    ready_count += 1
+
+                pod_statuses.append({
+                    'name': pod_name,
+                    'phase': pod_phase,
+                    'ready': is_ready
+                })
+
+            check_passed = ready_count >= min_ready
+            duration = time.time() - start_time
+
+            return HealthCheckResult(
+                check_type=HealthCheckType.POD_READY.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=check_passed,
+                message=f"Ready pods: {ready_count}/{min_ready} (total: {len(pods)})",
+                details={
+                    'selector': selector,
+                    'namespace': namespace,
+                    'ready_count': ready_count,
+                    'min_ready': min_ready,
+                    'total_pods': len(pods),
+                    'pods': pod_statuses
+                },
+                duration=duration
+            )
+
+        except json.JSONDecodeError as e:
+            return HealthCheckResult(
+                check_type=HealthCheckType.POD_READY.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=False,
+                message=f"Failed to parse pod status: {str(e)}",
+                duration=time.time() - start_time
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                check_type=HealthCheckType.POD_READY.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=False,
+                message=f"Pod ready check failed: {str(e)}",
+                duration=time.time() - start_time
+            )
+
+    def check_deployment_ready(self, node_name: str, check_config: Dict[str, Any]) -> HealthCheckResult:
+        """检查Deployment是否就绪
+
+        Args:
+            node_name: K8S集群名称
+            check_config: 检查配置，包含:
+                - name: Deployment名称
+                - timeout: 超时时间秒数 (默认60)
+
+        Returns:
+            HealthCheckResult: 检查结果
+        """
+        start_time = time.time()
+
+        try:
+            cluster = self._get_k8s_cluster(node_name)
+            if not cluster:
+                return HealthCheckResult(
+                    check_type=HealthCheckType.DEPLOYMENT_READY.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message=f"Node {node_name} is not a K8S cluster",
+                    duration=time.time() - start_time
+                )
+
+            deployment_name = check_config.get('name', self.service.name)
+            namespace = check_config.get('namespace') or self._get_service_namespace()
+
+            # 构建kubectl命令获取Deployment状态
+            cmd = cluster.build_kubectl_command(
+                'get', namespace=namespace,
+                extra_args=['deployment', deployment_name, '-o', 'json']
+            )
+
+            success, stdout, stderr = self._execute_kubectl(cluster, cmd)
+
+            if not success:
+                return HealthCheckResult(
+                    check_type=HealthCheckType.DEPLOYMENT_READY.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message=f"Failed to get deployment: {stderr}",
+                    duration=time.time() - start_time
+                )
+
+            # 解析JSON输出
+            deployment = json.loads(stdout)
+            status = deployment.get('status', {})
+
+            replicas = status.get('replicas', 0)
+            ready_replicas = status.get('readyReplicas', 0)
+            available_replicas = status.get('availableReplicas', 0)
+            updated_replicas = status.get('updatedReplicas', 0)
+
+            # 检查Deployment是否完全就绪
+            check_passed = (
+                replicas > 0 and
+                ready_replicas == replicas and
+                available_replicas == replicas
+            )
+
+            duration = time.time() - start_time
+
+            return HealthCheckResult(
+                check_type=HealthCheckType.DEPLOYMENT_READY.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=check_passed,
+                message=f"Deployment {deployment_name}: {ready_replicas}/{replicas} ready, {available_replicas} available",
+                details={
+                    'name': deployment_name,
+                    'namespace': namespace,
+                    'replicas': replicas,
+                    'ready_replicas': ready_replicas,
+                    'available_replicas': available_replicas,
+                    'updated_replicas': updated_replicas
+                },
+                duration=duration
+            )
+
+        except json.JSONDecodeError as e:
+            return HealthCheckResult(
+                check_type=HealthCheckType.DEPLOYMENT_READY.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=False,
+                message=f"Failed to parse deployment status: {str(e)}",
+                duration=time.time() - start_time
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                check_type=HealthCheckType.DEPLOYMENT_READY.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=False,
+                message=f"Deployment ready check failed: {str(e)}",
+                duration=time.time() - start_time
+            )
+
+    def check_resource_exists(self, node_name: str, check_config: Dict[str, Any]) -> HealthCheckResult:
+        """检查K8S资源是否存在
+
+        Args:
+            node_name: K8S集群名称
+            check_config: 检查配置，包含:
+                - kind: 资源类型 (如 "ConfigMap", "Service", "Secret")
+                - name: 资源名称
+
+        Returns:
+            HealthCheckResult: 检查结果
+        """
+        start_time = time.time()
+
+        try:
+            cluster = self._get_k8s_cluster(node_name)
+            if not cluster:
+                return HealthCheckResult(
+                    check_type=HealthCheckType.RESOURCE_EXISTS.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message=f"Node {node_name} is not a K8S cluster",
+                    duration=time.time() - start_time
+                )
+
+            resource_kind = check_config.get('kind', '')
+            resource_name = check_config.get('name', '')
+            namespace = check_config.get('namespace') or self._get_service_namespace()
+
+            if not resource_kind or not resource_name:
+                return HealthCheckResult(
+                    check_type=HealthCheckType.RESOURCE_EXISTS.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message="Missing 'kind' or 'name' in check config",
+                    duration=time.time() - start_time
+                )
+
+            # 构建kubectl命令检查资源
+            cmd = cluster.build_kubectl_command(
+                'get', namespace=namespace,
+                extra_args=[resource_kind.lower(), resource_name, '-o', 'json']
+            )
+
+            success, stdout, stderr = self._execute_kubectl(cluster, cmd)
+
+            duration = time.time() - start_time
+
+            if not success:
+                # 资源不存在
+                return HealthCheckResult(
+                    check_type=HealthCheckType.RESOURCE_EXISTS.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message=f"{resource_kind}/{resource_name} not found in namespace {namespace}",
+                    details={
+                        'kind': resource_kind,
+                        'name': resource_name,
+                        'namespace': namespace,
+                        'error': stderr
+                    },
+                    duration=duration
+                )
+
+            # 资源存在
+            return HealthCheckResult(
+                check_type=HealthCheckType.RESOURCE_EXISTS.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=True,
+                message=f"{resource_kind}/{resource_name} exists in namespace {namespace}",
+                details={
+                    'kind': resource_kind,
+                    'name': resource_name,
+                    'namespace': namespace
+                },
+                duration=duration
+            )
+
+        except Exception as e:
+            return HealthCheckResult(
+                check_type=HealthCheckType.RESOURCE_EXISTS.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=False,
+                message=f"Resource exists check failed: {str(e)}",
+                duration=time.time() - start_time
+            )
+
+    def check_service_endpoints(self, node_name: str, check_config: Dict[str, Any]) -> HealthCheckResult:
+        """检查K8S Service的Endpoints是否就绪
+
+        Args:
+            node_name: K8S集群名称
+            check_config: 检查配置，包含:
+                - name: Service名称
+                - min_endpoints: 最少端点数量 (默认1)
+
+        Returns:
+            HealthCheckResult: 检查结果
+        """
+        start_time = time.time()
+
+        try:
+            cluster = self._get_k8s_cluster(node_name)
+            if not cluster:
+                return HealthCheckResult(
+                    check_type=HealthCheckType.SERVICE_ENDPOINTS.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message=f"Node {node_name} is not a K8S cluster",
+                    duration=time.time() - start_time
+                )
+
+            service_name = check_config.get('name', self.service.name)
+            min_endpoints = check_config.get('min_endpoints', 1)
+            namespace = check_config.get('namespace') or self._get_service_namespace()
+
+            # 构建kubectl命令获取Endpoints
+            cmd = cluster.build_kubectl_command(
+                'get', namespace=namespace,
+                extra_args=['endpoints', service_name, '-o', 'json']
+            )
+
+            success, stdout, stderr = self._execute_kubectl(cluster, cmd)
+
+            if not success:
+                return HealthCheckResult(
+                    check_type=HealthCheckType.SERVICE_ENDPOINTS.value,
+                    service_name=self.service.name,
+                    node_name=node_name,
+                    success=False,
+                    message=f"Failed to get endpoints: {stderr}",
+                    duration=time.time() - start_time
+                )
+
+            # 解析JSON输出
+            endpoints = json.loads(stdout)
+            subsets = endpoints.get('subsets', [])
+
+            # 统计就绪的端点数量
+            ready_addresses = []
+            for subset in subsets:
+                addresses = subset.get('addresses', [])
+                for addr in addresses:
+                    ready_addresses.append(addr.get('ip', 'unknown'))
+
+            endpoint_count = len(ready_addresses)
+            check_passed = endpoint_count >= min_endpoints
+
+            duration = time.time() - start_time
+
+            return HealthCheckResult(
+                check_type=HealthCheckType.SERVICE_ENDPOINTS.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=check_passed,
+                message=f"Service {service_name}: {endpoint_count}/{min_endpoints} endpoints ready",
+                details={
+                    'name': service_name,
+                    'namespace': namespace,
+                    'endpoint_count': endpoint_count,
+                    'min_endpoints': min_endpoints,
+                    'addresses': ready_addresses
+                },
+                duration=duration
+            )
+
+        except json.JSONDecodeError as e:
+            return HealthCheckResult(
+                check_type=HealthCheckType.SERVICE_ENDPOINTS.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=False,
+                message=f"Failed to parse endpoints status: {str(e)}",
+                duration=time.time() - start_time
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                check_type=HealthCheckType.SERVICE_ENDPOINTS.value,
+                service_name=self.service.name,
+                node_name=node_name,
+                success=False,
+                message=f"Service endpoints check failed: {str(e)}",
+                duration=time.time() - start_time
+            )
+
+    # ==================== 通用检查方法 ====================
+
     def run_comprehensive_check(self, node_name: str) -> List[HealthCheckResult]:
         """运行综合健康检查"""
         results = []
@@ -209,12 +695,23 @@ class ServiceHealthChecker:
         for check_config in health_config.checks:
             check_type = check_config.get('type', '')
             required = check_config.get('required', True)
-            
+
             try:
+                # Docker检查
                 if check_type == HealthCheckType.DOCKER_STATUS.value:
                     result = self.check_docker_status(node_name)
+                # 通用HTTP检查
                 elif check_type == HealthCheckType.HTTP_ENDPOINT.value:
                     result = self.check_http_endpoint(node_name, check_config)
+                # K8S检查类型
+                elif check_type == HealthCheckType.POD_READY.value:
+                    result = self.check_pod_ready(node_name, check_config)
+                elif check_type == HealthCheckType.DEPLOYMENT_READY.value:
+                    result = self.check_deployment_ready(node_name, check_config)
+                elif check_type == HealthCheckType.RESOURCE_EXISTS.value:
+                    result = self.check_resource_exists(node_name, check_config)
+                elif check_type == HealthCheckType.SERVICE_ENDPOINTS.value:
+                    result = self.check_service_endpoints(node_name, check_config)
                 else:
                     result = HealthCheckResult(
                         check_type=check_type,

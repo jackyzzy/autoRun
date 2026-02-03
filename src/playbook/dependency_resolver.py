@@ -6,7 +6,8 @@
 import logging
 import time
 import asyncio
-from typing import Dict, List, Optional, Set, Tuple
+import json
+from typing import Dict, List, Optional, Set, Tuple, Any
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
@@ -40,12 +41,14 @@ class ServiceNode:
 
 class ServiceDependencyResolver:
     """服务依赖解析器"""
-    
-    def __init__(self, docker_manager: DockerComposeManager):
+
+    def __init__(self, docker_manager: DockerComposeManager, node_manager=None):
         self.logger = logging.getLogger("playbook.dependency_resolver")
         self.docker_manager = docker_manager
+        self.node_manager = node_manager  # 用于K8S支持
         self.service_nodes: Dict[str, ServiceNode] = {}
         self.deployment_batches: List[List[ServiceNode]] = []
+        self._kubectl_backend = None  # K8S后端（懒加载）
         
     def build_dependency_graph(self, services: List[ServiceDeployment]) -> bool:
         """构建服务依赖图"""
@@ -174,15 +177,120 @@ class ServiceDependencyResolver:
         self.logger.info(f"Calculated {len(batches)} deployment batches")
         return batches
     
+    def _is_k8s_node(self, node_name: str) -> bool:
+        """判断节点是否为K8S集群"""
+        if self.node_manager is None:
+            return False
+        return self.node_manager.is_k8s_cluster(node_name)
+
+    def _is_k8s_service(self, service_name: str) -> bool:
+        """判断服务是否为K8S服务"""
+        if service_name not in self.service_nodes:
+            return False
+        service_node = self.service_nodes[service_name]
+        service = service_node.service
+        # 检查kubectl配置
+        if hasattr(service, 'kubectl') and service.kubectl is not None:
+            return True
+        # 检查节点是否为K8S集群
+        for node_name in service.nodes:
+            if self._is_k8s_node(node_name):
+                return True
+        return False
+
+    def _get_k8s_service_status(self, service_name: str, node_name: str) -> Dict[str, any]:
+        """获取K8S服务状态
+
+        Args:
+            service_name: 服务名称
+            node_name: K8S集群名称
+
+        Returns:
+            dict: {'running': bool, 'error': str}
+        """
+        try:
+            if self.node_manager is None:
+                return {'running': False, 'error': 'NodeManager not available'}
+
+            cluster = self.node_manager.get_k8s_cluster(node_name)
+            if not cluster:
+                return {'running': False, 'error': f'K8S cluster {node_name} not found'}
+
+            # 获取服务配置中的selector或label
+            service_node = self.service_nodes.get(service_name)
+            if not service_node:
+                return {'running': False, 'error': f'Service {service_name} not found'}
+
+            service = service_node.service
+            kubectl_config = getattr(service, 'kubectl', None)
+            if not kubectl_config:
+                return {'running': False, 'error': 'No kubectl config found'}
+
+            namespace = kubectl_config.get('namespace', cluster.default_namespace)
+
+            # 从健康检查配置中获取selector
+            health_check = service.health_check
+            selector = None
+            if health_check and health_check.checks:
+                for check in health_check.checks:
+                    if check.get('type') == 'pod_ready' and 'selector' in check:
+                        selector = check['selector']
+                        break
+
+            if not selector:
+                # 如果没有配置selector，尝试使用服务名称作为app label
+                selector = f"app={service_name}"
+
+            # 检查Pod状态
+            cmd = f"kubectl get pods -l {selector} -n {namespace} -o json"
+            if cluster.kubeconfig:
+                cmd = f"kubectl --kubeconfig={cluster.kubeconfig} get pods -l {selector} -n {namespace} -o json"
+
+            ssh_client = cluster.get_ssh_client()
+            result = ssh_client.execute_command(cmd)
+
+            if result[0] != 0:
+                return {'running': False, 'error': f'kubectl command failed: {result[2]}'}
+
+            import json
+            try:
+                pods_data = json.loads(result[1])
+            except json.JSONDecodeError:
+                return {'running': False, 'error': 'Failed to parse kubectl output'}
+
+            pods = pods_data.get('items', [])
+            if not pods:
+                return {'running': False, 'error': 'No pods found'}
+
+            # 检查所有Pod是否Ready
+            ready_count = 0
+            for pod in pods:
+                conditions = pod.get('status', {}).get('conditions', [])
+                for condition in conditions:
+                    if condition.get('type') == 'Ready' and condition.get('status') == 'True':
+                        ready_count += 1
+                        break
+
+            if ready_count == len(pods) and ready_count > 0:
+                return {'running': True, 'ready_count': ready_count, 'total_count': len(pods)}
+            else:
+                return {'running': False, 'ready_count': ready_count, 'total_count': len(pods),
+                       'error': f'Only {ready_count}/{len(pods)} pods ready'}
+
+        except Exception as e:
+            self.logger.warning(f"Failed to get K8S service status for {service_name}: {e}")
+            return {'running': False, 'error': str(e)}
+
     def wait_for_service_ready(self, service_name: str, node_names: List[str],
                               timeout: int = 200) -> bool:
-        """🏥 等待服务在指定节点上就绪 - 智能健康检查
+        """🏥 等待服务在指定节点上就绪 - 智能健康检查（支持K8S和Docker）
 
         🎯 改进机制：
         1. 动态调整检查间隔
         2. 提前检测失败状态
         3. 详细的状态日志
         4. 智能退出条件
+        5. 自动识别K8S服务并使用对应的检查方式
 
         Args:
             service_name: 服务名称
@@ -198,7 +306,10 @@ class ServiceDependencyResolver:
         consecutive_failures = 0
         max_consecutive_failures = 3  # 连续失败次数阈值
 
-        self.logger.info(f"Waiting for service {service_name} to be ready on {len(node_names)} nodes")
+        # 判断是否为K8S服务
+        is_k8s = self._is_k8s_service(service_name)
+        service_type = "K8S" if is_k8s else "Docker"
+        self.logger.info(f"Waiting for {service_type} service {service_name} to be ready on {len(node_names)} nodes")
 
         while time.time() - start_time < timeout:
             all_ready = True
@@ -207,7 +318,11 @@ class ServiceDependencyResolver:
 
             for node_name in node_names:
                 try:
-                    status = self.docker_manager.get_service_status(service_name, node_name)
+                    # 根据服务类型选择检查方式
+                    if is_k8s or self._is_k8s_node(node_name):
+                        status = self._get_k8s_service_status(service_name, node_name)
+                    else:
+                        status = self.docker_manager.get_service_status(service_name, node_name)
 
                     if status.get('running', False):
                         ready_nodes.append(node_name)
@@ -420,25 +535,79 @@ class ServiceDependencyResolver:
         }
     
     def cleanup_failed_services(self, scenario_path):
-        """清理失败的服务"""
+        """清理失败的服务（支持Docker和K8S）"""
         failed_services = [
-            node for node in self.service_nodes.values() 
+            node for node in self.service_nodes.values()
             if node.status == DependencyStatus.FAILED
         ]
-        
+
         if not failed_services:
             return
-        
+
         self.logger.info(f"Cleaning up {len(failed_services)} failed services")
-        
+
         for service_node in failed_services:
-            for node_name in service_node.service.nodes:
+            service = service_node.service
+            is_k8s = self._is_k8s_service(service.name)
+
+            for node_name in service.nodes:
                 try:
-                    self.docker_manager.stop_service(
-                        scenario_path, service_node.service, node_name
-                    )
+                    if is_k8s or self._is_k8s_node(node_name):
+                        # K8S服务清理
+                        self._cleanup_k8s_service(scenario_path, service, node_name)
+                    else:
+                        # Docker服务清理
+                        self.docker_manager.stop_service(
+                            scenario_path, service, node_name
+                        )
                 except Exception as e:
-                    self.logger.warning(f"Failed to cleanup {service_node.service.name} on {node_name}: {e}")
+                    self.logger.warning(f"Failed to cleanup {service.name} on {node_name}: {e}")
+
+    def _cleanup_k8s_service(self, scenario_path: Path, service, node_name: str):
+        """清理K8S服务
+
+        Args:
+            scenario_path: 场景路径
+            service: 服务配置
+            node_name: K8S集群名称
+        """
+        try:
+            if self.node_manager is None:
+                self.logger.warning("NodeManager not available for K8S cleanup")
+                return
+
+            cluster = self.node_manager.get_k8s_cluster(node_name)
+            if not cluster:
+                self.logger.warning(f"K8S cluster {node_name} not found for cleanup")
+                return
+
+            kubectl_config = getattr(service, 'kubectl', None)
+            if not kubectl_config:
+                self.logger.warning(f"No kubectl config for service {service.name}")
+                return
+
+            steps = kubectl_config.get('steps', [])
+            namespace = kubectl_config.get('namespace', cluster.default_namespace)
+
+            # 反向删除所有资源
+            remote_dir = f"{cluster.kubectl_work_dir}/{service.name}"
+            ssh_client = cluster.get_ssh_client()
+
+            for step in reversed(steps):
+                manifest_file = step.get('manifest', '')
+                if manifest_file:
+                    remote_path = f"{remote_dir}/{manifest_file}"
+                    cmd = cluster.build_kubectl_delete_command(remote_path, namespace)
+                    try:
+                        result = ssh_client.execute_command(cmd)
+                        self.logger.debug(f"K8S cleanup result for {manifest_file}: {result}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to delete K8S resource {manifest_file}: {e}")
+
+            self.logger.info(f"K8S service {service.name} cleanup completed on {node_name}")
+
+        except Exception as e:
+            self.logger.error(f"K8S service cleanup failed for {service.name}: {e}")
 
     async def deploy_batch_concurrent(self, batch: List[ServiceNode], scenario_path,
                                     max_concurrent: int = 5, timeout: int = 300) -> Dict[str, bool]:

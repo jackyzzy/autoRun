@@ -117,54 +117,106 @@ class DockerComposeManager:
             self.compose_files[file_path] = DockerComposeFile(file_path)
         return self.compose_files[file_path]
     
-    def validate_service_deployment(self, scenario_path: Path, 
+    def validate_service_deployment(self, scenario_path: Path,
                                   services: List[ServiceDeployment]) -> Dict[str, List[str]]:
-        """验证服务部署配置"""
+        """验证服务部署配置
+
+        支持Docker Compose和K8S两种服务类型：
+        - Docker Compose服务：验证compose文件和Docker节点
+        - K8S服务：验证manifests目录和K8S集群
+        """
         results = {
             'valid_services': [],
             'invalid_services': [],
             'missing_files': [],
             'missing_nodes': []
         }
-        
+
         # 发现可用的compose文件
         available_files = self.discover_compose_files(scenario_path)
-        
-        # 获取可用节点
-        available_nodes = {node.name for node in self.node_manager.get_nodes()}
-        
+
+        # 获取可用的Docker节点
+        available_docker_nodes = {node.name for node in self.node_manager.get_nodes()}
+
+        # 获取可用的K8S集群
+        available_k8s_clusters = set(self.node_manager.kubernetes.keys()) if hasattr(self.node_manager, 'kubernetes') else set()
+
         for service in services:
-            compose_file_path = scenario_path / service.compose_file
-            
-            # 检查compose文件是否存在
-            if not compose_file_path.exists():
-                results['missing_files'].append(f"{service.name}: {service.compose_file}")
-                continue
-            
-            try:
-                # 加载compose文件
-                compose_file = self.load_compose_file(str(compose_file_path))
-                
-                # 检查服务是否存在于compose文件中
-                if not compose_file.has_service(service.name):
-                    results['invalid_services'].append(
-                        f"{service.name}: not found in {service.compose_file}"
-                    )
+            # 判断是否为K8S服务
+            is_k8s_service = hasattr(service, 'kubectl') and service.kubectl is not None
+
+            if is_k8s_service:
+                # K8S服务验证
+                try:
+                    # 检查manifests目录是否存在
+                    manifests_dir = scenario_path / "manifests"
+                    if not manifests_dir.exists():
+                        results['missing_files'].append(f"{service.name}: manifests directory not found")
+                        continue
+
+                    # 检查kubectl配置中的manifest文件是否存在
+                    kubectl_config = service.kubectl
+                    steps = kubectl_config.get('steps', [])
+                    missing_manifests = []
+                    for step in steps:
+                        manifest_file = step.get('manifest', '')
+                        if manifest_file:
+                            manifest_path = manifests_dir / manifest_file
+                            if not manifest_path.exists():
+                                missing_manifests.append(manifest_file)
+
+                    if missing_manifests:
+                        results['missing_files'].append(
+                            f"{service.name}: manifest files not found: {missing_manifests}"
+                        )
+                        continue
+
+                    # 检查K8S集群是否存在
+                    missing_clusters = set(service.nodes) - available_k8s_clusters
+                    if missing_clusters:
+                        results['missing_nodes'].append(
+                            f"{service.name}: K8S clusters {list(missing_clusters)} not available"
+                        )
+                        continue
+
+                    results['valid_services'].append(service.name)
+
+                except Exception as e:
+                    results['invalid_services'].append(f"{service.name}: {str(e)}")
+
+            else:
+                # Docker Compose服务验证（原有逻辑）
+                compose_file_path = scenario_path / service.compose_file
+
+                # 检查compose文件是否存在
+                if not compose_file_path.exists():
+                    results['missing_files'].append(f"{service.name}: {service.compose_file}")
                     continue
-                
-                # 检查节点是否存在
-                missing_nodes = set(service.nodes) - available_nodes
-                if missing_nodes:
-                    results['missing_nodes'].extend([
-                        f"{service.name}: nodes {list(missing_nodes)} not available"
-                    ])
-                    continue
-                
-                results['valid_services'].append(service.name)
-                
-            except Exception as e:
-                results['invalid_services'].append(f"{service.name}: {str(e)}")
-        
+
+                try:
+                    # 加载compose文件
+                    compose_file = self.load_compose_file(str(compose_file_path))
+
+                    # 检查服务是否存在于compose文件中
+                    if not compose_file.has_service(service.name):
+                        results['invalid_services'].append(
+                            f"{service.name}: not found in {service.compose_file}"
+                        )
+                        continue
+
+                    # 检查节点是否存在
+                    missing_nodes = set(service.nodes) - available_docker_nodes
+                    if missing_nodes:
+                        results['missing_nodes'].extend([
+                            f"{service.name}: nodes {list(missing_nodes)} not available"
+                        ])
+                        continue
+
+                    results['valid_services'].append(service.name)
+
+                except Exception as e:
+                    results['invalid_services'].append(f"{service.name}: {str(e)}")
+
         return results
     
     def deploy_service(self, scenario_path: Path, service: ServiceDeployment,

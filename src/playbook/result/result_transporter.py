@@ -402,7 +402,7 @@ class ResultTransporter:
 
     def collect_service_logs(self, node_names: List[str], local_base_dir: Path,
                            collection_summary: CollectionSummary, scenario: Optional[Scenario] = None):
-        """收集服务日志"""
+        """收集服务日志（支持Docker节点和K8S集群）"""
         self.logger.info(f"Collecting service logs from {len(node_names)} nodes")
 
         # Docker compose服务日志配置
@@ -416,11 +416,17 @@ class ResultTransporter:
             node_dir.mkdir(parents=True, exist_ok=True)
 
             try:
-                # 获取节点
+                # 检查是否为K8S集群
+                if self.node_manager.is_k8s_cluster(node_name):
+                    # K8S集群：收集K8S日志
+                    self._collect_k8s_logs(node_name, node_dir, scenario)
+                    continue
+
+                # 获取Docker节点
                 node = self.node_manager.get_node(node_name)
                 if not node:
-                    self.logger.error(f"Node {node_name} not found")
-                    return False
+                    self.logger.error(f"Node {node_name} not found (not a Docker node or K8S cluster)")
+                    continue
                 
                 for cmd_config in compose_commands:
                     try:
@@ -494,27 +500,140 @@ class ResultTransporter:
                 error_msg = f"Failed to collect service logs from {node_name}: {e}"
                 self.logger.warning(error_msg)
                 collection_summary.collection_errors.append(error_msg)
-    
+
+    def _collect_k8s_logs(self, cluster_name: str, node_dir: Path, scenario: Optional[Scenario] = None):
+        """收集K8S集群的Pod日志
+
+        Args:
+            cluster_name: K8S集群名称
+            node_dir: 日志存储目录
+            scenario: 场景对象（可选，用于获取服务配置）
+        """
+        try:
+            cluster = self.node_manager.get_k8s_cluster(cluster_name)
+            if not cluster:
+                self.logger.warning(f"K8S cluster {cluster_name} not found for log collection")
+                return
+
+            ssh_client = cluster.get_ssh_client()
+
+            # 获取服务配置中的selector（如果有）
+            selector = None
+            namespace = cluster.default_namespace
+            if scenario and scenario.metadata and scenario.metadata.services:
+                for service in scenario.metadata.services:
+                    if hasattr(service, 'kubectl') and service.kubectl:
+                        namespace = service.kubectl.get('namespace', namespace)
+                        # 从健康检查配置中获取selector
+                        if service.health_check and service.health_check.checks:
+                            for check in service.health_check.checks:
+                                if check.get('type') == 'pod_ready' and 'selector' in check:
+                                    selector = check['selector']
+                                    break
+
+            # 1. 收集Pod列表和状态
+            pod_list_cmd = f"kubectl get pods -n {namespace} -o wide"
+            if selector:
+                pod_list_cmd = f"kubectl get pods -l {selector} -n {namespace} -o wide"
+            if cluster.kubeconfig:
+                pod_list_cmd = f"kubectl --kubeconfig={cluster.kubeconfig} " + pod_list_cmd.replace("kubectl ", "")
+
+            result = ssh_client.execute_command(pod_list_cmd)
+            if result[0] == 0:
+                pod_status_file = node_dir / "k8s_pod_status.txt"
+                with open(pod_status_file, 'w', encoding='utf-8') as f:
+                    f.write(f"# K8S Pod Status from cluster {cluster_name}\n")
+                    f.write(f"# Namespace: {namespace}\n")
+                    f.write(f"# Selector: {selector or 'all pods'}\n")
+                    f.write(f"# Collected at: {datetime.now().isoformat()}\n\n")
+                    f.write(result[1])
+                self.logger.info(f"Collected K8S pod status from {cluster_name}")
+
+            # 2. 收集Pod描述（events等详细信息）
+            pod_describe_cmd = f"kubectl describe pods -n {namespace}"
+            if selector:
+                pod_describe_cmd = f"kubectl describe pods -l {selector} -n {namespace}"
+            if cluster.kubeconfig:
+                pod_describe_cmd = f"kubectl --kubeconfig={cluster.kubeconfig} " + pod_describe_cmd.replace("kubectl ", "")
+
+            result = ssh_client.execute_command(pod_describe_cmd)
+            if result[0] == 0:
+                pod_describe_file = node_dir / "k8s_pod_describe.txt"
+                with open(pod_describe_file, 'w', encoding='utf-8') as f:
+                    f.write(f"# K8S Pod Describe from cluster {cluster_name}\n")
+                    f.write(f"# Namespace: {namespace}\n")
+                    f.write(f"# Collected at: {datetime.now().isoformat()}\n\n")
+                    f.write(result[1])
+                self.logger.info(f"Collected K8S pod describe from {cluster_name}")
+
+            # 3. 收集Pod日志（最近1000行）
+            # 首先获取Pod名称列表
+            pod_names_cmd = f"kubectl get pods -n {namespace} -o jsonpath='{{.items[*].metadata.name}}'"
+            if selector:
+                pod_names_cmd = f"kubectl get pods -l {selector} -n {namespace} -o jsonpath='{{.items[*].metadata.name}}'"
+            if cluster.kubeconfig:
+                pod_names_cmd = f"kubectl --kubeconfig={cluster.kubeconfig} " + pod_names_cmd.replace("kubectl ", "")
+
+            result = ssh_client.execute_command(pod_names_cmd)
+            if result[0] == 0 and result[1].strip():
+                pod_names = result[1].strip().split()
+                for pod_name in pod_names[:10]:  # 限制最多收集10个Pod的日志
+                    log_cmd = f"kubectl logs {pod_name} -n {namespace} --tail=1000"
+                    if cluster.kubeconfig:
+                        log_cmd = f"kubectl --kubeconfig={cluster.kubeconfig} logs {pod_name} -n {namespace} --tail=1000"
+
+                    log_result = ssh_client.execute_command(log_cmd)
+                    if log_result[0] == 0:
+                        pod_log_file = node_dir / f"k8s_pod_log_{pod_name}.txt"
+                        with open(pod_log_file, 'w', encoding='utf-8') as f:
+                            f.write(f"# K8S Pod Log: {pod_name}\n")
+                            f.write(f"# Cluster: {cluster_name}\n")
+                            f.write(f"# Namespace: {namespace}\n")
+                            f.write(f"# Collected at: {datetime.now().isoformat()}\n\n")
+                            f.write(log_result[1])
+
+            self.logger.info(f"K8S log collection completed for cluster {cluster_name}")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to collect K8S logs from {cluster_name}: {e}")
+
     def collect_system_logs(self, node_names: List[str], local_base_dir: Path,
                           collection_summary: CollectionSummary):
-        """收集系统日志"""
+        """收集系统日志（支持Docker节点和K8S集群）"""
         self.logger.info(f"Collecting system logs from {len(node_names)} nodes")
-        
-        # 系统日志命令
-        system_log_commands = {
+
+        # Docker节点的系统日志命令
+        docker_system_log_commands = {
             "docker_info.txt": "docker info",
             "docker_images.txt": "docker images --format 'table {{.Repository}}\\t{{.Tag}}\\t{{.Size}}\\t{{.CreatedAt}}'",
             "docker_containers.txt": "docker ps -a --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}\\t{{.CreatedAt}}'",
             "system_resources.txt": "free -h && echo '---' && df -h && echo '---' && top -b -n 1 | head -20"
         }
-        
+
+        # K8S集群的系统日志命令
+        k8s_system_log_commands = {
+            "k8s_nodes.txt": "kubectl get nodes -o wide",
+            "k8s_cluster_info.txt": "kubectl cluster-info",
+            "system_resources.txt": "free -h && echo '---' && df -h && echo '---' && top -b -n 1 | head -20"
+        }
+
         for node_name in node_names:
             node_dir = local_base_dir / "logs" / node_name
             node_dir.mkdir(parents=True, exist_ok=True)
-            
+
+            # 判断是否为K8S集群
+            is_k8s = self.node_manager.is_k8s_cluster(node_name)
+            system_log_commands = k8s_system_log_commands if is_k8s else docker_system_log_commands
+
             try:
                 for log_name, command in system_log_commands.items():
                     try:
+                        # 对于K8S集群，需要添加kubeconfig参数
+                        if is_k8s and command.startswith("kubectl"):
+                            cluster = self.node_manager.get_k8s_cluster(node_name)
+                            if cluster and cluster.kubeconfig:
+                                command = command.replace("kubectl", f"kubectl --kubeconfig={cluster.kubeconfig}")
+
                         results = self.node_manager.execute_command(
                             command, [node_name], timeout=30
                         )
