@@ -273,13 +273,13 @@ class DockerComposeBackend(DeploymentBackend):
         Returns:
             ServiceDeployment对象
         """
-        from ..scenario_manager import ServiceDeployment, HealthCheckConfig
+        from ..scenario_manager import ServiceDeployment, ServiceHealthCheck
 
         # 构建健康检查配置
         health_check = None
         hc_config = service_config.get('health_check', {})
         if hc_config.get('enabled', False):
-            health_check = HealthCheckConfig(
+            health_check = ServiceHealthCheck(
                 enabled=True,
                 strategy=hc_config.get('strategy', 'standard'),
                 startup_timeout=hc_config.get('startup_timeout', 60),

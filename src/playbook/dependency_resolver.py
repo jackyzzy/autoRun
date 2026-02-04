@@ -6,7 +6,6 @@
 import logging
 import time
 import asyncio
-import json
 from typing import Dict, List, Optional, Set, Tuple, Any
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -42,13 +41,18 @@ class ServiceNode:
 class ServiceDependencyResolver:
     """服务依赖解析器"""
 
-    def __init__(self, docker_manager: DockerComposeManager, node_manager=None):
+    def __init__(self, docker_manager: DockerComposeManager, node_manager=None, backend_factory=None):
         self.logger = logging.getLogger("playbook.dependency_resolver")
         self.docker_manager = docker_manager
-        self.node_manager = node_manager  # 用于K8S支持
+        self.node_manager = node_manager
         self.service_nodes: Dict[str, ServiceNode] = {}
         self.deployment_batches: List[List[ServiceNode]] = []
-        self._kubectl_backend = None  # K8S后端（懒加载）
+
+        # 使用传入的factory或自动创建（保持向后兼容）
+        if backend_factory is None and node_manager is not None:
+            from .deployment import DeploymentBackendFactory
+            backend_factory = DeploymentBackendFactory(node_manager, docker_manager)
+        self.backend_factory = backend_factory
         
     def build_dependency_graph(self, services: List[ServiceDeployment]) -> bool:
         """构建服务依赖图"""
@@ -177,120 +181,99 @@ class ServiceDependencyResolver:
         self.logger.info(f"Calculated {len(batches)} deployment batches")
         return batches
     
-    def _is_k8s_node(self, node_name: str) -> bool:
-        """判断节点是否为K8S集群"""
-        if self.node_manager is None:
-            return False
-        return self.node_manager.is_k8s_cluster(node_name)
+    def _get_service_for_status_check(self, service_name: str):
+        """获取用于状态检查的服务对象"""
+        if service_name in self.service_nodes:
+            return self.service_nodes[service_name].service
+        return None
 
-    def _is_k8s_service(self, service_name: str) -> bool:
-        """判断服务是否为K8S服务"""
-        if service_name not in self.service_nodes:
-            return False
-        service_node = self.service_nodes[service_name]
-        service = service_node.service
-        # 检查kubectl配置
-        if hasattr(service, 'kubectl') and service.kubectl is not None:
-            return True
-        # 检查节点是否为K8S集群
-        for node_name in service.nodes:
-            if self._is_k8s_node(node_name):
-                return True
-        return False
+    def _build_status_check_context(self, service) -> Optional[Dict[str, Any]]:
+        """构建K8S服务状态检查的上下文
 
-    def _get_k8s_service_status(self, service_name: str, node_name: str) -> Dict[str, any]:
-        """获取K8S服务状态
+        从服务的kubectl配置和health_check配置中提取状态检查所需的信息。
 
         Args:
-            service_name: 服务名称
-            node_name: K8S集群名称
+            service: 服务配置（ServiceDeployment对象或字典）
 
         Returns:
-            dict: {'running': bool, 'error': str}
+            dict或None: 包含namespace、kind、name等信息的上下文字典，
+                       如果不是K8S服务则返回None
         """
-        try:
-            if self.node_manager is None:
-                return {'running': False, 'error': 'NodeManager not available'}
+        if service is None:
+            return None
 
-            cluster = self.node_manager.get_k8s_cluster(node_name)
-            if not cluster:
-                return {'running': False, 'error': f'K8S cluster {node_name} not found'}
+        # 获取kubectl配置
+        kubectl_config = None
+        if hasattr(service, 'kubectl'):
+            kubectl_config = service.kubectl
+        elif isinstance(service, dict):
+            kubectl_config = service.get('kubectl')
 
-            # 获取服务配置中的selector或label
-            service_node = self.service_nodes.get(service_name)
-            if not service_node:
-                return {'running': False, 'error': f'Service {service_name} not found'}
+        if not kubectl_config:
+            return None  # 非K8S服务
 
-            service = service_node.service
-            kubectl_config = getattr(service, 'kubectl', None)
-            if not kubectl_config:
-                return {'running': False, 'error': 'No kubectl config found'}
+        context = {
+            'namespace': kubectl_config.get('namespace', 'default')
+        }
 
-            namespace = kubectl_config.get('namespace', cluster.default_namespace)
-
-            # 从健康检查配置中获取selector
+        # 优先从health_check.checks中获取检查信息
+        health_check = None
+        if hasattr(service, 'health_check') and service.health_check:
             health_check = service.health_check
-            selector = None
-            if health_check and health_check.checks:
-                for check in health_check.checks:
-                    if check.get('type') == 'pod_ready' and 'selector' in check:
-                        selector = check['selector']
-                        break
+        elif isinstance(service, dict):
+            health_check = service.get('health_check')
 
-            if not selector:
-                # 如果没有配置selector，尝试使用服务名称作为app label
-                selector = f"app={service_name}"
+        if health_check:
+            checks = []
+            if hasattr(health_check, 'checks'):
+                checks = health_check.checks or []
+            elif isinstance(health_check, dict):
+                checks = health_check.get('checks', [])
 
-            # 检查Pod状态
-            cmd = f"kubectl get pods -l {selector} -n {namespace} -o json"
-            if cluster.kubeconfig:
-                cmd = f"kubectl --kubeconfig={cluster.kubeconfig} get pods -l {selector} -n {namespace} -o json"
+            # 找到第一个pod_ready或deployment_ready检查
+            for check in checks:
+                check_dict = check if isinstance(check, dict) else vars(check) if hasattr(check, '__dict__') else {}
+                check_type = check_dict.get('type', '')
 
-            ssh_client = cluster.get_ssh_client()
-            result = ssh_client.execute_command(cmd)
+                if check_type == 'pod_ready':
+                    # pod_ready检查：使用selector来检查pod状态
+                    context['kind'] = 'pod'
+                    context['selector'] = check_dict.get('selector', '')
+                    context['min_ready'] = check_dict.get('min_ready', 1)
+                    return context
+                elif check_type == 'deployment_ready':
+                    context['kind'] = 'deployment'
+                    context['name'] = check_dict.get('name', '')
+                    return context
 
-            if result[0] != 0:
-                return {'running': False, 'error': f'kubectl command failed: {result[2]}'}
+        # 从kubectl.steps中获取最后一个step的check信息
+        steps = kubectl_config.get('steps', [])
+        if steps:
+            last_step = steps[-1]
+            check = last_step.get('check', {})
+            check_type = check.get('type', '')
 
-            import json
-            try:
-                pods_data = json.loads(result[1])
-            except json.JSONDecodeError:
-                return {'running': False, 'error': 'Failed to parse kubectl output'}
+            if check_type == 'resource_exists':
+                context['kind'] = check.get('kind', 'deployment').lower()
+                context['name'] = check.get('name', '')
+            elif check_type == 'deployment_ready':
+                context['kind'] = 'deployment'
+                context['name'] = check.get('name', '')
 
-            pods = pods_data.get('items', [])
-            if not pods:
-                return {'running': False, 'error': 'No pods found'}
-
-            # 检查所有Pod是否Ready
-            ready_count = 0
-            for pod in pods:
-                conditions = pod.get('status', {}).get('conditions', [])
-                for condition in conditions:
-                    if condition.get('type') == 'Ready' and condition.get('status') == 'True':
-                        ready_count += 1
-                        break
-
-            if ready_count == len(pods) and ready_count > 0:
-                return {'running': True, 'ready_count': ready_count, 'total_count': len(pods)}
-            else:
-                return {'running': False, 'ready_count': ready_count, 'total_count': len(pods),
-                       'error': f'Only {ready_count}/{len(pods)} pods ready'}
-
-        except Exception as e:
-            self.logger.warning(f"Failed to get K8S service status for {service_name}: {e}")
-            return {'running': False, 'error': str(e)}
+        return context
 
     def wait_for_service_ready(self, service_name: str, node_names: List[str],
                               timeout: int = 200) -> bool:
-        """🏥 等待服务在指定节点上就绪 - 智能健康检查（支持K8S和Docker）
+        """🏥 等待服务在指定节点上就绪 - 智能健康检查
+
+        通过backend_factory统一处理Docker和K8S服务的状态检查。
 
         🎯 改进机制：
         1. 动态调整检查间隔
         2. 提前检测失败状态
         3. 详细的状态日志
         4. 智能退出条件
-        5. 自动识别K8S服务并使用对应的检查方式
+        5. 通过DeploymentBackendFactory自动选择检查方式
 
         Args:
             service_name: 服务名称
@@ -306,10 +289,11 @@ class ServiceDependencyResolver:
         consecutive_failures = 0
         max_consecutive_failures = 3  # 连续失败次数阈值
 
-        # 判断是否为K8S服务
-        is_k8s = self._is_k8s_service(service_name)
-        service_type = "K8S" if is_k8s else "Docker"
-        self.logger.info(f"Waiting for {service_type} service {service_name} to be ready on {len(node_names)} nodes")
+        # 获取服务对象用于后端选择
+        service = self._get_service_for_status_check(service_name)
+        # 构建K8S服务状态检查的上下文（Docker服务返回None）
+        status_context = self._build_status_check_context(service)
+        self.logger.info(f"Waiting for service {service_name} to be ready on {len(node_names)} nodes")
 
         while time.time() - start_time < timeout:
             all_ready = True
@@ -318,20 +302,25 @@ class ServiceDependencyResolver:
 
             for node_name in node_names:
                 try:
-                    # 根据服务类型选择检查方式
-                    if is_k8s or self._is_k8s_node(node_name):
-                        status = self._get_k8s_service_status(service_name, node_name)
+                    # 通过factory获取对应的后端进行状态检查
+                    if self.backend_factory:
+                        backend = self.backend_factory.get_backend(service, node_name)
+                        service_status = backend.get_service_status(service_name, node_name, status_context)
+                        is_running = service_status.running
+                        error_msg = service_status.details.get('error', '') if hasattr(service_status, 'details') else ''
                     else:
+                        # 无factory时使用docker_manager（向后兼容）
                         status = self.docker_manager.get_service_status(service_name, node_name)
+                        is_running = status.get('running', False)
+                        error_msg = status.get('error', '')
 
-                    if status.get('running', False):
+                    if is_running:
                         ready_nodes.append(node_name)
                     else:
                         all_ready = False
                         failed_nodes.append(node_name)
 
                         # 🚨 检查是否是永久性失败
-                        error_msg = status.get('error', '')
                         if self._is_permanent_failure(error_msg):
                             self.logger.error(f"Service {service_name} on {node_name} has permanent failure: {error_msg}")
                             return False
@@ -534,8 +523,48 @@ class ServiceDependencyResolver:
             'services': services_info
         }
     
+    def _service_to_config(self, service) -> dict:
+        """将ServiceDeployment对象转换为配置字典
+
+        Args:
+            service: ServiceDeployment对象或字典
+
+        Returns:
+            dict: 服务配置字典
+        """
+        if isinstance(service, dict):
+            return service
+
+        config = {
+            'name': service.name,
+            'nodes': service.nodes,
+            'depends_on': service.depends_on,
+        }
+
+        # 添加kubectl配置（K8S服务）
+        if hasattr(service, 'kubectl') and service.kubectl:
+            config['kubectl'] = service.kubectl
+
+        # 添加compose_file配置（Docker服务）
+        if hasattr(service, 'compose_file') and service.compose_file:
+            config['compose_file'] = service.compose_file
+
+        # 添加健康检查配置
+        if service.health_check:
+            config['health_check'] = {
+                'enabled': service.health_check.enabled,
+                'strategy': getattr(service.health_check, 'strategy', 'standard'),
+                'startup_timeout': getattr(service.health_check, 'startup_timeout', 60),
+                'checks': getattr(service.health_check, 'checks', [])
+            }
+
+        return config
+
     def cleanup_failed_services(self, scenario_path):
-        """清理失败的服务（支持Docker和K8S）"""
+        """清理失败的服务
+
+        通过backend_factory统一处理Docker和K8S服务的清理。
+        """
         failed_services = [
             node for node in self.service_nodes.values()
             if node.status == DependencyStatus.FAILED
@@ -548,66 +577,21 @@ class ServiceDependencyResolver:
 
         for service_node in failed_services:
             service = service_node.service
-            is_k8s = self._is_k8s_service(service.name)
 
             for node_name in service.nodes:
                 try:
-                    if is_k8s or self._is_k8s_node(node_name):
-                        # K8S服务清理
-                        self._cleanup_k8s_service(scenario_path, service, node_name)
+                    if self.backend_factory:
+                        # 通过factory获取对应的后端进行清理
+                        backend = self.backend_factory.get_backend(service, node_name)
+                        service_config = self._service_to_config(service)
+                        backend.stop_service(scenario_path, service_config, node_name)
                     else:
-                        # Docker服务清理
+                        # 无factory时使用docker_manager（向后兼容）
                         self.docker_manager.stop_service(
                             scenario_path, service, node_name
                         )
                 except Exception as e:
                     self.logger.warning(f"Failed to cleanup {service.name} on {node_name}: {e}")
-
-    def _cleanup_k8s_service(self, scenario_path: Path, service, node_name: str):
-        """清理K8S服务
-
-        Args:
-            scenario_path: 场景路径
-            service: 服务配置
-            node_name: K8S集群名称
-        """
-        try:
-            if self.node_manager is None:
-                self.logger.warning("NodeManager not available for K8S cleanup")
-                return
-
-            cluster = self.node_manager.get_k8s_cluster(node_name)
-            if not cluster:
-                self.logger.warning(f"K8S cluster {node_name} not found for cleanup")
-                return
-
-            kubectl_config = getattr(service, 'kubectl', None)
-            if not kubectl_config:
-                self.logger.warning(f"No kubectl config for service {service.name}")
-                return
-
-            steps = kubectl_config.get('steps', [])
-            namespace = kubectl_config.get('namespace', cluster.default_namespace)
-
-            # 反向删除所有资源
-            remote_dir = f"{cluster.kubectl_work_dir}/{service.name}"
-            ssh_client = cluster.get_ssh_client()
-
-            for step in reversed(steps):
-                manifest_file = step.get('manifest', '')
-                if manifest_file:
-                    remote_path = f"{remote_dir}/{manifest_file}"
-                    cmd = cluster.build_kubectl_delete_command(remote_path, namespace)
-                    try:
-                        result = ssh_client.execute_command(cmd)
-                        self.logger.debug(f"K8S cleanup result for {manifest_file}: {result}")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to delete K8S resource {manifest_file}: {e}")
-
-            self.logger.info(f"K8S service {service.name} cleanup completed on {node_name}")
-
-        except Exception as e:
-            self.logger.error(f"K8S service cleanup failed for {service.name}: {e}")
 
     async def deploy_batch_concurrent(self, batch: List[ServiceNode], scenario_path,
                                     max_concurrent: int = 5, timeout: int = 300) -> Dict[str, bool]:

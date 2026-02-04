@@ -6,7 +6,7 @@
     - DeploymentBackend: 部署后端抽象基类
     - DockerComposeBackend: Docker Compose部署后端
     - KubectlBackend: Kubernetes部署后端
-    - DeploymentManager: 统一部署管理器（自动选择后端）
+    - DeploymentBackendFactory: 后端工厂（自动选择后端）
 """
 
 from .backend import (
@@ -17,6 +17,7 @@ from .backend import (
 )
 from .docker_compose_backend import DockerComposeBackend
 from .kubectl_backend import KubectlBackend
+from .factory import DeploymentBackendFactory
 
 __all__ = [
     'DeploymentPlatform',
@@ -24,5 +25,6 @@ __all__ = [
     'ServiceStatus',
     'DeploymentBackend',
     'DockerComposeBackend',
-    'KubectlBackend'
+    'KubectlBackend',
+    'DeploymentBackendFactory'
 ]

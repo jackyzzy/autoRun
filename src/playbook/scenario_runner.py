@@ -21,6 +21,7 @@ from .scenario_resource_manager import ScenarioResourceManager
 from .concurrent_deployer import (
     ConcurrentServiceDeployer, ConcurrentDeploymentLogger, ConcurrentRetryStrategy
 )
+from .deployment import DeploymentBackendFactory
 from ..utils.logger import setup_scenario_logger
 
 class ScenarioStatus(Enum):
@@ -111,13 +112,16 @@ class ScenarioRunner:
         
         # 新组件初始化
         self.docker_manager = DockerComposeManager(node_manager)
-        self.dependency_resolver = ServiceDependencyResolver(self.docker_manager, node_manager)  # 传递node_manager以支持K8S
+        self.backend_factory = DeploymentBackendFactory(node_manager, self.docker_manager)
+        self.dependency_resolver = ServiceDependencyResolver(
+            self.docker_manager, node_manager, self.backend_factory
+        )
         self.health_checker = HealthCheckManager(node_manager)
         self.test_executor = TestScriptExecutor(node_manager)
 
-        # 并发部署组件（传递node_manager以支持K8S）
+        # 并发部署组件（共享backend_factory）
         self.concurrent_deployer = ConcurrentServiceDeployer(
-            self.docker_manager, self.dependency_resolver, node_manager
+            self.docker_manager, self.dependency_resolver, node_manager, self.backend_factory
         )
         # 资源管理组件
         self.resource_manager = ScenarioResourceManager(node_manager)
@@ -682,7 +686,7 @@ class ScenarioRunner:
             self.logger.error(f"❌ Emergency service cleanup completely failed for {self.current_scenario}")
 
     async def _emergency_stop_services_concurrent(self, batches, scenario_path, logger):
-        """智能并发紧急停止服务（主要方案，支持K8S和Docker）"""
+        """智能并发紧急停止服务（通过后端工厂自动选择后端）"""
         max_concurrent = 8
         semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -699,30 +703,20 @@ class ScenarioRunner:
                 nonlocal stopped_count, failed_count
                 async with semaphore:
                     service = service_node.service
-                    # 判断是否为K8S服务
-                    is_k8s_service = hasattr(service, 'kubectl') and service.kubectl is not None
 
                     for node_name in service.nodes:
                         try:
-                            # 也检查节点是否为K8S集群
-                            is_k8s_node = self.node_manager.is_k8s_cluster(node_name) if self.node_manager else False
-                            is_k8s = is_k8s_service or is_k8s_node
+                            # 使用后端工厂自动选择正确的后端
+                            backend = self.backend_factory.get_backend(service, node_name)
+                            service_config = self._service_to_config(service)
 
-                            logger.info(f"🔄 Stopping {'K8S' if is_k8s else 'Docker'} service {service.name} on {node_name}...")
+                            logger.info(f"🔄 Stopping {service.name} on {node_name} via {backend.platform.value}...")
 
                             loop = asyncio.get_event_loop()
-                            if is_k8s:
-                                # K8S服务清理
-                                success = await loop.run_in_executor(
-                                    None, self._stop_k8s_service,
-                                    scenario_path, service, node_name
-                                )
-                            else:
-                                # Docker服务清理
-                                success = await loop.run_in_executor(
-                                    None, self.docker_manager.stop_service,
-                                    scenario_path, service, node_name, 30  # 30秒紧急超时
-                                )
+                            success = await loop.run_in_executor(
+                                None, backend.stop_service,
+                                scenario_path, service_config, node_name, 30
+                            )
 
                             if success:
                                 logger.info(f"✅ Emergency stopped {service.name} on {node_name}")
@@ -744,10 +738,7 @@ class ScenarioRunner:
         logger.info(f"📊 Intelligent cleanup summary: {stopped_count} stopped, {failed_count} failed")
 
     def _emergency_stop_services_force(self, scenario, scenario_path):
-        """强制紧急停止服务（备用方案）
-
-        支持Docker Compose和K8S两种服务类型
-        """
+        """强制紧急停止服务（备用方案，通过后端工厂自动选择后端）"""
         self.logger.info("🔧 Force stopping all services (fallback method)")
 
         stopped_count = 0
@@ -755,21 +746,15 @@ class ScenarioRunner:
         total_services = len(scenario.metadata.services)
 
         for service in scenario.metadata.services:
-            # 判断是否为K8S服务
-            is_k8s_service = hasattr(service, 'kubectl') and service.kubectl is not None
-
             for node_name in service.nodes:
                 try:
-                    self.logger.info(f"🔄 Force stopping {service.name} on {node_name}...")
+                    # 使用后端工厂自动选择正确的后端
+                    backend = self.backend_factory.get_backend(service, node_name)
+                    service_config = self._service_to_config(service)
 
-                    if is_k8s_service:
-                        # K8S服务清理
-                        success = self._stop_k8s_service(scenario_path, service, node_name)
-                    else:
-                        # Docker Compose服务清理
-                        success = self.docker_manager.stop_service(
-                            scenario_path, service, node_name, timeout=30
-                        )
+                    self.logger.info(f"🔄 Force stopping {service.name} on {node_name} via {backend.platform.value}...")
+
+                    success = backend.stop_service(scenario_path, service_config, node_name, 30)
 
                     if success:
                         self.logger.info(f"✅ Force stopped {service.name} on {node_name}")
@@ -783,47 +768,42 @@ class ScenarioRunner:
 
         self.logger.info(f"📊 Force cleanup summary: {stopped_count}/{total_services} stopped, {failed_count} failed")
 
-    def _stop_k8s_service(self, scenario_path: Path, service, node_name: str) -> bool:
-        """停止K8S服务
+    def _service_to_config(self, service) -> dict:
+        """将ServiceDeployment转换为配置字典
 
         Args:
-            scenario_path: 场景路径
-            service: 服务配置
-            node_name: K8S集群名称
+            service: ServiceDeployment对象或字典
 
         Returns:
-            bool: 是否成功
+            dict: 服务配置字典
         """
-        try:
-            # 获取K8S集群
-            cluster = self.node_manager.get_k8s_cluster(node_name)
-            if not cluster:
-                self.logger.error(f"K8S cluster {node_name} not found")
-                return False
+        if isinstance(service, dict):
+            return service
 
-            kubectl_config = service.kubectl
-            steps = kubectl_config.get('steps', [])
-            namespace = kubectl_config.get('namespace', cluster.default_namespace)
+        config = {
+            'name': service.name,
+            'nodes': service.nodes,
+            'depends_on': service.depends_on,
+        }
 
-            # 反向删除所有资源
-            manifests_dir = scenario_path / "manifests"
-            remote_dir = f"{cluster.kubectl_work_dir}/{service.name}"
+        # 添加kubectl配置（K8S服务）
+        if hasattr(service, 'kubectl') and service.kubectl:
+            config['kubectl'] = service.kubectl
 
-            for step in reversed(steps):
-                manifest_file = step.get('manifest', '')
-                if manifest_file:
-                    remote_path = f"{remote_dir}/{manifest_file}"
-                    cmd = cluster.build_kubectl_delete_command(remote_path, namespace)
+        # 添加compose_file配置（Docker服务）
+        if hasattr(service, 'compose_file') and service.compose_file:
+            config['compose_file'] = service.compose_file
 
-                    ssh_client = cluster.get_ssh_client()
-                    result = ssh_client.execute_command(cmd)
-                    self.logger.debug(f"kubectl delete result: {result}")
+        # 添加健康检查配置
+        if service.health_check:
+            config['health_check'] = {
+                'enabled': service.health_check.enabled,
+                'strategy': getattr(service.health_check, 'strategy', 'standard'),
+                'startup_timeout': getattr(service.health_check, 'startup_timeout', 60),
+                'checks': getattr(service.health_check, 'checks', [])
+            }
 
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Failed to stop K8S service {service.name}: {e}")
-            return False
+        return config
 
     def get_execution_summary(self) -> Dict[str, Any]:
         """获取执行摘要"""
@@ -908,14 +888,13 @@ class ScenarioRunner:
         concurrent_config = execution_config.get('concurrent_deployment', {})
         max_concurrent_services = concurrent_config.get('max_concurrent_services', 5)
 
-        # 配置重试策略（传递node_manager和dependency_resolver以支持K8S）
+        # 配置重试策略（通过backend_factory支持多平台）
         retry_config = execution_config.get('retry_strategy', {})
         retry_strategy = ConcurrentRetryStrategy(
             max_retries=retry_config.get('service_level_retries', 2),
             retry_delay=retry_config.get('retry_delay', 30),
             retry_only_failed=retry_config.get('retry_only_failed', True),
-            node_manager=self.node_manager,
-            dependency_resolver=self.dependency_resolver
+            backend_factory=self.backend_factory
         )
 
         # 获取超时配置
@@ -1153,7 +1132,7 @@ class ScenarioRunner:
         logger.info("Distributed services stop completed")
 
     async def _stop_services_concurrent(self, batches, scenario_path, max_concurrent, deployment_timeout, logger):
-        """并发停止服务批次（支持K8S和Docker）"""
+        """并发停止服务批次（通过后端工厂自动选择后端）"""
         semaphore = asyncio.Semaphore(max_concurrent)
 
         for i, batch in enumerate(batches, 1):
@@ -1163,27 +1142,18 @@ class ScenarioRunner:
                 async with semaphore:
                     service = service_node.service
                     loop = asyncio.get_event_loop()
-                    # 判断是否为K8S服务
-                    is_k8s_service = hasattr(service, 'kubectl') and service.kubectl is not None
 
                     for node_name in service.nodes:
                         try:
-                            # 也检查节点是否为K8S集群
-                            is_k8s_node = self.node_manager.is_k8s_cluster(node_name) if self.node_manager else False
-                            is_k8s = is_k8s_service or is_k8s_node
+                            # 使用后端工厂自动选择正确的后端
+                            backend = self.backend_factory.get_backend(service, node_name)
+                            service_config = self._service_to_config(service)
 
-                            if is_k8s:
-                                # K8S服务清理
-                                success = await loop.run_in_executor(
-                                    None, self._stop_k8s_service,
-                                    scenario_path, service, node_name
-                                )
-                            else:
-                                # Docker服务清理
-                                success = await loop.run_in_executor(
-                                    None, self.docker_manager.stop_service,
-                                    scenario_path, service, node_name, deployment_timeout
-                                )
+                            success = await loop.run_in_executor(
+                                None, backend.stop_service,
+                                scenario_path, service_config, node_name, deployment_timeout
+                            )
+
                             if success:
                                 logger.info(f"Stopped {service.name} on {node_name}")
                             else:

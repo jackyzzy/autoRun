@@ -252,7 +252,7 @@ class KubectlBackend(DeploymentBackend):
         Args:
             service_name: 服务名称
             node_name: K8S集群名称
-            context: 上下文，包含namespace、kind等信息
+            context: 上下文，包含namespace、kind、selector等信息
 
         Returns:
             ServiceStatus: 服务状态
@@ -260,6 +260,9 @@ class KubectlBackend(DeploymentBackend):
         context = context or {}
         namespace = context.get('namespace', 'default')
         resource_type = context.get('kind', 'deployment')
+        selector = context.get('selector', '')
+        min_ready = context.get('min_ready', 1)
+        resource_name = context.get('name', service_name)
 
         try:
             cluster = self._get_cluster(node_name)
@@ -272,50 +275,16 @@ class KubectlBackend(DeploymentBackend):
                     details={'error': f'K8S cluster not found: {node_name}'}
                 )
 
-            # 构建并执行kubectl get命令
-            cmd = cluster.build_kubectl_get_command(
-                resource_type, service_name, namespace, 'json'
-            )
-            success, output, error = self._execute_ssh(cluster, cmd)
-
-            if not success:
-                return ServiceStatus(
-                    service_name=service_name,
-                    platform=self.platform,
-                    running=False,
-                    ready=False,
-                    details={'error': error}
-                )
-
-            # 解析JSON输出
-            resource_data = json.loads(output)
-            status = resource_data.get('status', {})
-
-            # 根据资源类型解析状态
-            if resource_type.lower() in ['deployment', 'statefulset', 'replicaset']:
-                replicas = status.get('replicas', 0)
-                ready_replicas = status.get('readyReplicas', 0)
-
-                return ServiceStatus(
-                    service_name=service_name,
-                    platform=self.platform,
-                    running=replicas > 0,
-                    ready=ready_replicas == replicas and replicas > 0,
-                    replicas=replicas,
-                    ready_replicas=ready_replicas,
-                    details={
-                        'conditions': status.get('conditions', []),
-                        'availableReplicas': status.get('availableReplicas', 0)
-                    }
+            # 根据资源类型选择不同的检查方式
+            if resource_type.lower() == 'pod' and selector:
+                # 使用selector检查pods状态
+                return self._check_pods_by_selector(
+                    cluster, service_name, namespace, selector, min_ready
                 )
             else:
-                # 其他资源类型
-                return ServiceStatus(
-                    service_name=service_name,
-                    platform=self.platform,
-                    running=True,
-                    ready=True,
-                    details={'raw_status': status}
+                # 检查单个资源的状态
+                return self._check_resource_status(
+                    cluster, service_name, resource_type, resource_name, namespace
                 )
 
         except json.JSONDecodeError as e:
@@ -335,6 +304,137 @@ class KubectlBackend(DeploymentBackend):
                 running=False,
                 ready=False,
                 details={'error': str(e)}
+            )
+
+    def _check_pods_by_selector(self, cluster, service_name: str, namespace: str,
+                                selector: str, min_ready: int) -> ServiceStatus:
+        """使用selector检查pods状态
+
+        Args:
+            cluster: K8S集群对象
+            service_name: 服务名称
+            namespace: 命名空间
+            selector: Pod选择器
+            min_ready: 最小就绪pod数
+
+        Returns:
+            ServiceStatus: 服务状态
+        """
+        # 构建kubectl get pods命令
+        cmd = cluster.build_kubectl_command(
+            action="get",
+            namespace=namespace,
+            extra_args=["pods", "-l", selector, "-o", "json"]
+        )
+        success, output, error = self._execute_ssh(cluster, cmd)
+
+        if not success:
+            return ServiceStatus(
+                service_name=service_name,
+                platform=self.platform,
+                running=False,
+                ready=False,
+                details={'error': error}
+            )
+
+        # 解析JSON输出
+        pods_data = json.loads(output)
+        items = pods_data.get('items', [])
+
+        total_pods = len(items)
+        ready_pods = 0
+
+        for pod in items:
+            pod_status = pod.get('status', {})
+            phase = pod_status.get('phase', '')
+            conditions = pod_status.get('conditions', [])
+
+            # 检查pod是否处于Running状态且Ready条件为True
+            is_ready = False
+            if phase == 'Running':
+                for condition in conditions:
+                    if condition.get('type') == 'Ready' and condition.get('status') == 'True':
+                        is_ready = True
+                        break
+
+            if is_ready:
+                ready_pods += 1
+
+        self.logger.info(f"Pods status for {service_name}: {ready_pods}/{total_pods} ready (min_ready={min_ready})")
+
+        return ServiceStatus(
+            service_name=service_name,
+            platform=self.platform,
+            running=total_pods > 0,
+            ready=ready_pods >= min_ready,
+            replicas=total_pods,
+            ready_replicas=ready_pods,
+            details={
+                'selector': selector,
+                'min_ready': min_ready,
+                'total_pods': total_pods,
+                'ready_pods': ready_pods
+            }
+        )
+
+    def _check_resource_status(self, cluster, service_name: str, resource_type: str,
+                               resource_name: str, namespace: str) -> ServiceStatus:
+        """检查单个K8S资源的状态
+
+        Args:
+            cluster: K8S集群对象
+            service_name: 服务名称
+            resource_type: 资源类型
+            resource_name: 资源名称
+            namespace: 命名空间
+
+        Returns:
+            ServiceStatus: 服务状态
+        """
+        # 构建并执行kubectl get命令
+        cmd = cluster.build_kubectl_get_command(
+            resource_type, resource_name, namespace, 'json'
+        )
+        success, output, error = self._execute_ssh(cluster, cmd)
+
+        if not success:
+            return ServiceStatus(
+                service_name=service_name,
+                platform=self.platform,
+                running=False,
+                ready=False,
+                details={'error': error}
+            )
+
+        # 解析JSON输出
+        resource_data = json.loads(output)
+        status = resource_data.get('status', {})
+
+        # 根据资源类型解析状态
+        if resource_type.lower() in ['deployment', 'statefulset', 'replicaset']:
+            replicas = status.get('replicas', 0)
+            ready_replicas = status.get('readyReplicas', 0)
+
+            return ServiceStatus(
+                service_name=service_name,
+                platform=self.platform,
+                running=replicas > 0,
+                ready=ready_replicas == replicas and replicas > 0,
+                replicas=replicas,
+                ready_replicas=ready_replicas,
+                details={
+                    'conditions': status.get('conditions', []),
+                    'availableReplicas': status.get('availableReplicas', 0)
+                }
+            )
+        else:
+            # 其他资源类型（如RoleBasedGroup等CRD）- 只要资源存在就认为是运行中
+            return ServiceStatus(
+                service_name=service_name,
+                platform=self.platform,
+                running=True,
+                ready=True,
+                details={'raw_status': status}
             )
 
     def health_check(self, service_name: str, node_name: str,

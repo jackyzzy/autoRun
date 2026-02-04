@@ -8,6 +8,7 @@
 - **场景化测试**: 支持完全可配置的测试场景和执行顺序，三种执行模式
 - **🔒 资源完全隔离**: Scenario间完全资源隔离，确保每个测试在干净环境中运行
 - **Docker服务管理**: 远程管理推理服务的启动和停止，支持Docker Compose版本自适应
+- **☸️ Kubernetes支持**: 原生支持K8S集群部署，通过统一后端工厂自动选择部署方式
 - **基准测试执行**: 集成AICP基准测试，支持多种测试配置和并行执行
 - **💾 智能结果收集**: 支持三种收集模式(basic/standard/comprehensive)，自动识别测试执行节点，内置完整性验证和重试机制
 - **健康状态监控**: 全面的系统健康检查和容错机制，支持自动恢复
@@ -17,6 +18,7 @@
 - **🔄 增强重试机制**: 重试前自动清理Docker服务，支持指数退避延迟和连通性验证
 - **⚡ 并发部署优化**: 基于依赖关系的智能并发部署，大幅提升部署效率
 - **🚨 优雅中断处理**: 支持关键步骤的取消检查，确保中断操作的及时响应
+- **🔌 可扩展部署架构**: 策略模式的部署后端设计，便于扩展新的部署方式（如Helm、Ray等）
 
 ## 📁 项目结构
 
@@ -45,7 +47,13 @@ test_playbook/
 │   │   ├── scenario_*.py   # 场景管理和执行
 │   │   ├── scenario_resource_manager.py # 资源隔离管理器
 │   │   ├── docker_*.py     # Docker服务管理
+│   │   ├── deployment/     # 部署后端模块
+│   │   │   ├── __init__.py              # 导出DeploymentBackend接口
+│   │   │   ├── factory.py               # 部署后端工厂
+│   │   │   ├── docker_compose_backend.py # Docker Compose后端
+│   │   │   └── kubectl_backend.py        # Kubernetes后端
 │   │   ├── concurrent_deployer.py # 并发部署管理器
+│   │   ├── dependency_resolver.py # 依赖解析器
 │   │   ├── health_check_manager.py # 健康检查管理器
 │   │   ├── benchmark_runner.py # 基准测试执行
 │   │   ├── result/         # 结果收集模块
@@ -620,6 +628,163 @@ execution_config:
 # V1: docker-compose -f file.yml up -d
 # V2: docker compose -f file.yml up -d
 ```
+
+### ☸️ Kubernetes部署支持
+
+Playbook 原生支持Kubernetes集群部署，通过统一的部署后端架构实现Docker Compose和K8S的无缝切换。
+
+#### 部署后端架构
+
+系统采用**策略模式**设计，通过`DeploymentBackendFactory`工厂类自动选择合适的部署后端：
+
+```python
+# 架构设计
+DeploymentBackend (抽象基类)
+    ├── DockerComposeBackend  # Docker Compose部署
+    └── KubectlBackend        # Kubernetes部署
+
+DeploymentBackendFactory      # 工厂类，自动选择后端
+```
+
+**核心优势**：
+- **统一接口**: 所有部署操作通过统一的`DeploymentBackend`接口
+- **自动选择**: 工厂根据场景配置自动选择Docker或K8S后端
+- **零侵入**: 业务代码无需关心底层部署方式，消除`if is_k8s` 分支
+- **易扩展**: 便于添加新的部署方式（Helm、Ray等）
+
+#### K8S场景配置
+
+在场景的`metadata.yaml`中配置Kubernetes部署：
+
+```yaml
+# metadata.yaml
+name: "k8s_baseline_test"
+description: "基于K8S的基线性能测试"
+
+# 部署配置
+deployment:
+  platform: "kubernetes"  # 指定部署平台
+
+  services:
+    - name: "auto-rbg-pd-k8s"
+      node: "k8s-master"
+
+      # K8S特定配置
+      kubectl:
+        cluster: "prod-cluster"
+        namespace: "inference"
+        kubeconfig: "/root/.kube/config"
+
+        # 部署步骤
+        steps:
+          - action: "apply"
+            manifest: "rbg-deployment.yaml"
+            check:
+              type: "resource_exists"
+              kind: "RoleBasedGroup"
+              name: "auto-rbg-pd-k8s"
+
+      # 健康检查配置
+      health_check:
+        enabled: true
+        checks:
+          - type: "pod_ready"
+            selector: "app=auto-rbg-pd-k8s"  # Pod标签选择器
+            min_ready: 1                      # 最小就绪Pod数
+            timeout: 300
+```
+
+#### K8S健康检查
+
+支持多种K8S资源健康检查类型：
+
+**1. Pod就绪检查** (基于标签选择器):
+```yaml
+health_check:
+  checks:
+    - type: "pod_ready"
+      selector: "app=my-service,tier=backend"
+      min_ready: 2          # 至少2个Pod就绪
+      timeout: 300
+```
+
+**2. Deployment就绪检查**:
+```yaml
+health_check:
+  checks:
+    - type: "deployment_ready"
+      name: "my-deployment"
+      namespace: "default"
+      timeout: 180
+```
+
+**3. 自定义资源检查** (CRD):
+```yaml
+kubectl:
+  steps:
+    - action: "apply"
+      manifest: "custom-resource.yaml"
+      check:
+        type: "resource_exists"
+        kind: "RoleBasedGroup"     # 自定义资源类型
+        name: "my-custom-resource"
+```
+
+#### K8S部署工作流程
+
+系统自动处理K8S部署的完整生命周期：
+
+1. **资源创建**:
+   - 上传manifest文件到K8S master节点
+   - 执行`kubectl apply`应用资源配置
+
+2. **状态检查**:
+   - Pod就绪检查：`kubectl get pods -l <selector> -o json`
+   - 解析Pod状态，统计就绪数量
+
+3. **健康验证**:
+   - 等待Pod进入Running状态
+   - 验证容器就绪条件
+   - 确保满足最小就绪数要求
+
+4. **资源清理**:
+   - 执行`kubectl delete`清理资源
+   - 支持级联删除和优雅终止
+
+#### 与Docker Compose对比
+
+| 特性 | Docker Compose | Kubernetes |
+|------|----------------|------------|
+| 配置文件 | `docker-compose.yml` | YAML manifest |
+| 部署方式 | `docker compose up` | `kubectl apply` |
+| 状态查询 | `docker compose ps` | `kubectl get pods` |
+| 健康检查 | 容器状态检查 | Pod就绪检查 |
+| 依赖管理 | `depends_on` | 服务依赖图 |
+| 清理方式 | `docker compose down` | `kubectl delete` |
+
+#### 混合部署场景
+
+系统支持同一场景中混合使用Docker和K8S部署：
+
+```yaml
+deployment:
+  services:
+    # Docker Compose服务
+    - name: "mysql"
+      node: "node1"
+      compose_file: "mysql-compose.yml"
+
+    # K8S服务
+    - name: "api-gateway"
+      node: "k8s-master"
+      kubectl:
+        namespace: "default"
+        steps:
+          - action: "apply"
+            manifest: "gateway.yaml"
+```
+
+工厂模式会为每个服务自动选择正确的后端实现。
 
 ### 🚀 并发部署系统
 
