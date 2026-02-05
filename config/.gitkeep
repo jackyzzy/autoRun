@@ -1,7 +1,0 @@
-# This file ensures the config directory is tracked in git
-# while ignoring actual configuration files for security
-#
-# To use this project:
-# 1. Copy templates from templates/config/ to config/
-# 2. Customize the configuration files for your environment
-# 3. Never commit actual configuration files with sensitive data
