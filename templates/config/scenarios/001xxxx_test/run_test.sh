@@ -23,7 +23,7 @@ echo "💾 结果路径: $SCENARIO_RESULT_PATH"
 # 确保结果目录存在
 mkdir -p "${SCENARIO_RESULT_PATH}"
 
-# 运行AICP基准测试
+# 运行LLM性能基准测试
 docker run -it --rm \
   --network host \
   --ipc=host \
