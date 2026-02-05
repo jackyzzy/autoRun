@@ -1,25 +1,38 @@
 #!/usr/bin/env python3
 """将 ShareGPT 数据集转换为 filtered 格式，用于静态测试"""
 
+import argparse
 import json
 from transformers import AutoTokenizer
 from tqdm import tqdm
-
-# 配置
-sharegpt_path = "/data/nfs-share/dataset/ShareGPT_V3/ShareGPT_V3_unfiltered_cleaned_split1.json"
-output_path = "/data/nfs-share/dataset/filtered/filtered_from_sharegpt.json"
-tokenizer_path = "/data/nfs-share/models/qwen2.5-32-tokenizer"
 
 # 要生成的 input_len 分组
 target_lengths = [128, 512, 1024, 2048, 4096]
 samples_per_length = 500  # 每个长度采样数量
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="将 ShareGPT 数据集转换为 filtered 格式，用于静态测试")
+    parser.add_argument("--sharegpt-path", type=str,
+                        default="/data/dataset/ShareGPT_V3/ShareGPT_V3_unfiltered_cleaned_split1.json",
+                        help="ShareGPT 数据集路径")
+    parser.add_argument("--output-path", type=str,
+                        default="/data/dataset/filtered/filtered_from_sharegpt1.json",
+                        help="输出文件路径")
+    parser.add_argument("--tokenizer-path", type=str,
+                        default="/data/model/qwen2.5-32",
+                        help="Tokenizer 路径")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     # 加载 tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path, trust_remote_code=True)
     
     # 加载 ShareGPT 数据
-    with open(sharegpt_path, 'r', encoding='utf-8') as f:
+    with open(args.sharegpt_path, 'r', encoding='utf-8') as f:
         sharegpt_data = json.load(f)
     
     print(f"Loaded {len(sharegpt_data)} conversations from ShareGPT")
@@ -59,10 +72,10 @@ def main():
         print(f"  {length}: {count} samples")
     
     # 保存
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(args.output_path, 'w', encoding='utf-8') as f:
         json.dump(filtered_data, f, ensure_ascii=False, indent=2)
     
-    print(f"\nSaved to {output_path}")
+    print(f"\nSaved to {args.output_path}")
 
 if __name__ == "__main__":
     main()
