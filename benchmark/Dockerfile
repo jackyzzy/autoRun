@@ -12,7 +12,6 @@ FROM python:3.12
 
 WORKDIR /workspace
 
-COPY dataset /workspace/dataset
 COPY --from=builder /workspace/dist /workspace/dist
 
 RUN pip install --no-cache-dir /workspace/dist/*.whl
