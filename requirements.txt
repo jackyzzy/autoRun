@@ -27,4 +27,9 @@ pandas>=1.5.0
 # Developer/test helpers (optional)
 # pytest>=7.0.0
 
-# 如果以后需要benchmark，则直接使用代码目录的benchmark
+# Benchmark 依赖
+aiohttp>=3.8.0
+tqdm>=4.64.0
+numpy>=1.23.0
+openpyxl>=3.0.0
+transformers>=4.30.0
