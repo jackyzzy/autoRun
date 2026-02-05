@@ -649,28 +649,27 @@ class ScenarioRunner:
 
             self.logger.info(f"🧹 Cleaning up services for scenario: {scenario_name} (reason: {reason})")
 
-            # 🎯 主要方案：智能依赖清理 (复用现有逻辑)
+            # 🎯 主要方案：智能依赖清理（使用同步方式，避免event loop嵌套）
             if (hasattr(self, 'dependency_resolver') and self.dependency_resolver and
                 hasattr(self.dependency_resolver, 'get_deployment_batches')):
 
                 try:
                     batches = self.dependency_resolver.get_deployment_batches()
                     if batches:
-                        self.logger.info("✅ Using intelligent dependency-based cleanup")
+                        self.logger.info("✅ Using intelligent dependency-based cleanup (sync mode)")
                         reversed_batches = list(reversed(batches))
-                        asyncio.run(self._emergency_stop_services_concurrent(
+                        # 使用同步方式停止服务，避免asyncio.run()嵌套问题
+                        return self._emergency_stop_services_sync(
                             reversed_batches, Path(scenario.directory), self.logger
-                        ))
-                        return True
+                        )
                     else:
                         self.logger.warning("⚠️ Dependency batches empty, falling back to force cleanup")
                 except Exception as e:
                     self.logger.warning(f"⚠️ Dependency-based cleanup failed: {e}, falling back to force cleanup")
 
-            # 🛡️ 备用方案：强制全清理 (复用现有逻辑)
+            # 🛡️ 备用方案：强制全清理
             self.logger.warning("🔧 Using fallback force cleanup method")
-            self._emergency_stop_services_force(scenario, Path(scenario.directory))
-            return True
+            return self._emergency_stop_services_force(scenario, Path(scenario.directory))
 
         except Exception as e:
             self.logger.error(f"❌ Service cleanup failed for {scenario_name}: {e}")
@@ -737,15 +736,93 @@ class ScenarioRunner:
 
         logger.info(f"📊 Intelligent cleanup summary: {stopped_count} stopped, {failed_count} failed")
 
+    def _emergency_stop_services_sync(self, batches, scenario_path, logger):
+        """同步方式智能停止服务（按依赖关系反向停止）"""
+        import time
+
+        total_services = sum(len(batch) for batch in batches)
+        stopped_count = 0
+        failed_count = 0
+
+        logger.info(f"🔄 Stopping {total_services} services across {len(batches)} dependency batches (sync mode)")
+
+        for i, batch in enumerate(batches, 1):
+            logger.info(f"📋 Stopping batch {i}/{len(batches)} ({len(batch)} services)")
+
+            for service_node in batch:
+                service = service_node.service
+
+                for node_name in service.nodes:
+                    try:
+                        # 使用后端工厂自动选择正确的后端
+                        backend = self.backend_factory.get_backend(service, node_name)
+                        service_config = self._service_to_config(service)
+
+                        logger.info(f"🔄 Stopping {service.name} on {node_name} via {backend.platform.value}...")
+
+                        # 增加超时和重试机制
+                        success = False
+                        for attempt in range(3):  # 最多重试3次
+                            try:
+                                success = backend.stop_service(
+                                    scenario_path, service_config, node_name,
+                                    timeout=60  # 增加超时到60秒
+                                )
+                                if success:
+                                    break
+                                else:
+                                    if attempt < 2:
+                                        logger.warning(f"Attempt {attempt+1}/3 failed for {service.name}, retrying...")
+                                        time.sleep(2)
+                            except Exception as retry_e:
+                                if attempt < 2:
+                                    logger.warning(f"Attempt {attempt+1}/3 error for {service.name}: {retry_e}, retrying...")
+                                    time.sleep(2)
+                                else:
+                                    raise
+
+                        if success:
+                            logger.info(f"✅ Stopped {service.name} on {node_name}")
+                            stopped_count += 1
+                        else:
+                            logger.warning(f"⚠️ Failed to stop {service.name} on {node_name} after 3 attempts")
+                            failed_count += 1
+
+                    except Exception as e:
+                        logger.error(f"❌ Error stopping {service.name} on {node_name}: {e}")
+                        failed_count += 1
+
+            logger.info(f"✅ Batch {i}/{len(batches)} completed")
+
+        logger.info(f"📊 Sync cleanup summary: {stopped_count}/{total_services} stopped, {failed_count} failed")
+        return stopped_count > 0 or failed_count == 0  # 至少停止了一些服务或没有失败
+
     def _emergency_stop_services_force(self, scenario, scenario_path):
         """强制紧急停止服务（备用方案，通过后端工厂自动选择后端）"""
+        import time
+
         self.logger.info("🔧 Force stopping all services (fallback method)")
 
         stopped_count = 0
         failed_count = 0
         total_services = len(scenario.metadata.services)
 
-        for service in scenario.metadata.services:
+        # 尝试按反向依赖顺序停止（如果可能）
+        services = list(scenario.metadata.services)
+        if hasattr(self, 'dependency_resolver') and self.dependency_resolver:
+            try:
+                batches = self.dependency_resolver.get_deployment_batches()
+                if batches:
+                    # 反转批次并展开为服务列表
+                    services = []
+                    for batch in reversed(batches):
+                        for service_node in batch:
+                            services.append(service_node.service)
+                    self.logger.info("Using dependency-based stop order")
+            except:
+                pass  # 使用原始顺序
+
+        for service in services:
             for node_name in service.nodes:
                 try:
                     # 使用后端工厂自动选择正确的后端
@@ -754,19 +831,39 @@ class ScenarioRunner:
 
                     self.logger.info(f"🔄 Force stopping {service.name} on {node_name} via {backend.platform.value}...")
 
-                    success = backend.stop_service(scenario_path, service_config, node_name, 30)
+                    # 增加超时和重试机制
+                    success = False
+                    for attempt in range(3):  # 最多重试3次
+                        try:
+                            success = backend.stop_service(
+                                scenario_path, service_config, node_name,
+                                timeout=60  # 增加超时到60秒
+                            )
+                            if success:
+                                break
+                            else:
+                                if attempt < 2:
+                                    self.logger.warning(f"Attempt {attempt+1}/3 failed, retrying...")
+                                    time.sleep(2)
+                        except Exception as retry_e:
+                            if attempt < 2:
+                                self.logger.warning(f"Attempt {attempt+1}/3 error: {retry_e}, retrying...")
+                                time.sleep(2)
+                            else:
+                                raise
 
                     if success:
                         self.logger.info(f"✅ Force stopped {service.name} on {node_name}")
                         stopped_count += 1
                     else:
-                        self.logger.warning(f"⚠️ Failed to force stop {service.name} on {node_name}")
+                        self.logger.warning(f"⚠️ Failed to force stop {service.name} on {node_name} after 3 attempts")
                         failed_count += 1
                 except Exception as e:
                     self.logger.error(f"❌ Error force stopping {service.name} on {node_name}: {e}")
                     failed_count += 1
 
         self.logger.info(f"📊 Force cleanup summary: {stopped_count}/{total_services} stopped, {failed_count} failed")
+        return stopped_count > 0 or failed_count == 0  # 至少停止了一些服务或没有失败
 
     def _service_to_config(self, service) -> dict:
         """将ServiceDeployment转换为配置字典
